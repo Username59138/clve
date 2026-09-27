@@ -82,12 +82,12 @@ enum Cmd {
 enum NewCmd {
     /// New project: clve new video <name>
     Video { name: String },
-    /// New layer: clve new layer <type> <name> <file | text | #color>
+    /// New layer: clve new layer <type> <name> <file | text | #color | duration>
     Layer {
         #[arg(value_enum)]
         kind: LayerType,
         name: String,
-        /// File path (video, image, audio), text (text) or color (color)
+        /// File path (video, image, audio), text (text), color (color) or duration (adjust)
         value: String,
         /// Don't copy the file into media/, reference it by absolute path
         #[arg(long)]

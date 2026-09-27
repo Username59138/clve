@@ -12,6 +12,45 @@ pub enum Align {
     Right,
 }
 
+/// How a layer mixes with the pixels below it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Blend {
+    Normal,
+    Screen,
+    Add,
+    Multiply,
+    Lighten,
+    Darken,
+    Overlay,
+}
+
+impl Blend {
+    pub fn parse(s: &str) -> Result<Blend> {
+        Ok(match s {
+            "normal" => Blend::Normal,
+            "screen" => Blend::Screen,
+            "add" => Blend::Add,
+            "multiply" => Blend::Multiply,
+            "lighten" => Blend::Lighten,
+            "darken" => Blend::Darken,
+            "overlay" => Blend::Overlay,
+            _ => bail!("blend = \"{s}\": expected normal, screen, add, multiply, lighten, darken or overlay"),
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Blend::Normal => "normal",
+            Blend::Screen => "screen",
+            Blend::Add => "add",
+            Blend::Multiply => "multiply",
+            Blend::Lighten => "lighten",
+            Blend::Darken => "darken",
+            Blend::Overlay => "overlay",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LayerState {
     /// Anchor position in project pixels.
@@ -37,6 +76,13 @@ pub struct LayerState {
     pub color: [u8; 4],
     /// Pixel effects for this frame, in call order.
     pub fx: Vec<PixelFx>,
+    /// Mirror left to right / top to bottom.
+    pub flip_x: bool,
+    pub flip_y: bool,
+    pub blend: Blend,
+    /// Audio filter cutoffs in Hz, 0 = off.
+    pub lowpass: f64,
+    pub highpass: f64,
 }
 
 impl LayerState {
@@ -61,7 +107,18 @@ impl LayerState {
         }
         let scale = c.scale.unwrap_or(1.0);
         if !(scale >= 0.0) {
-            bail!("scale = {scale}: must not be negative");
+            bail!("scale = {scale}: must not be negative (to mirror, use flip_x = true)");
+        }
+        let blend = match c.blend.as_deref() {
+            Some(b) => Blend::parse(b)?,
+            None => Blend::Normal,
+        };
+        let lowpass = c.lowpass.unwrap_or(0.0);
+        let highpass = c.highpass.unwrap_or(0.0);
+        for (key, v) in [("lowpass", lowpass), ("highpass", highpass)] {
+            if !(v >= 0.0) {
+                bail!("{key} = {v}: must be 0 (off) or a frequency in Hz");
+            }
         }
         let volume = c.volume.unwrap_or(1.0);
         if !(volume >= 0.0) {
@@ -92,6 +149,11 @@ impl LayerState {
             align,
             color,
             fx: Vec::new(),
+            flip_x: c.flip_x.unwrap_or(false),
+            flip_y: c.flip_y.unwrap_or(false),
+            blend,
+            lowpass,
+            highpass,
         })
     }
 }
@@ -128,6 +190,14 @@ pub fn parse_color(s: &str) -> Result<[u8; 4]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blends() {
+        for name in ["normal", "screen", "add", "multiply", "lighten", "darken", "overlay"] {
+            assert_eq!(Blend::parse(name).unwrap().name(), name);
+        }
+        assert!(Blend::parse("dodge").is_err());
+    }
 
     #[test]
     fn colors() {

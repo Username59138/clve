@@ -26,13 +26,16 @@ seconds (for example an endless loop) stops the render with an error.
 | field      | types           | notes                                             |
 |------------|-----------------|---------------------------------------------------|
 | `x`, `y`   | all visual      | anchor position in pixels                         |
-| `scale`    | all visual      | negative values mirror                            |
+| `scale`    | all visual      | a negative value mirrors left↔right, like `flip_x` |
+| `flip_x`, `flip_y` | all visual | `true` mirrors the layer inside its box          |
+| `blend`    | all visual      | `"normal"`, `"screen"`, `"add"`, `"multiply"`, `"lighten"`, `"darken"`, `"overlay"` |
 | `rotation` | all visual      | degrees, clockwise                                |
 | `opacity`  | all visual      | 0..1                                              |
 | `anchor`   | all visual      | a name like `"bottom"` or `{x, y}` as fractions   |
 | `visible`  | all visual      | `false` hides the layer for this frame            |
 | `volume`   | video, audio    | animated volume is applied smoothly               |
 | `pan`      | video, audio    | -1 left … 1 right                                 |
+| `lowpass`, `highpass` | video, audio | filter cutoff in Hz, 0 = off; changes are smooth |
 | `text`     | text            | what is drawn                                     |
 | `content`  | text            | the original text from layer.toml (read it, don't change it) |
 | `font`, `size`, `align` | text   |                                               |
