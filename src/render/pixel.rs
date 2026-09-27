@@ -4,7 +4,9 @@
 //! (blur, glow, shadow) get a transparent margin, allocated once up front.
 //! Rows are processed in parallel.
 
+use super::gpu::{Gpu, Pass};
 use crate::fx::{PixelFx, Rgba};
+use crate::shader::Uniforms;
 use anyhow::{bail, Result};
 use rayon::prelude::*;
 use tiny_skia::{IntSize, Pixmap};
@@ -37,10 +39,29 @@ struct Img {
     content: ContentRect,
 }
 
+/// Time of the frame being drawn, for effects that change over time.
+#[derive(Clone, Copy)]
+pub struct FxTime {
+    /// Seconds since the layer started.
+    pub layer: f64,
+    /// Seconds on the timeline.
+    pub global: f64,
+    pub fps: f64,
+}
+
+/// The GPU is opened the first time a shader effect runs.
+pub type GpuSlot = Option<Gpu>;
+
 /// `density`: image pixels per project pixel, so lengths in effect parameters
 /// mean the same thing in a preview and a full render.
-/// `t`: timeline time, for effects that change over time (grain).
-pub fn apply(src: &Pixmap, content: ContentRect, fx: &[PixelFx], density: f32, t: f64) -> Result<Output> {
+pub fn apply(
+    src: &Pixmap,
+    content: ContentRect,
+    fx: &[PixelFx],
+    density: f32,
+    time: FxTime,
+    gpu: &mut GpuSlot,
+) -> Result<Output> {
     let grow = fx.iter().map(|f| extent(f, density)).sum::<f32>().ceil();
     let g = grow as usize;
     let (w, h) = (src.width() as usize + 2 * g, src.height() as usize + 2 * g);
@@ -66,8 +87,17 @@ pub fn apply(src: &Pixmap, content: ContentRect, fx: &[PixelFx], density: f32, t
         }
     });
 
-    for f in fx {
-        run(&mut img, f, density, t);
+    let mut i = 0;
+    while i < fx.len() {
+        // consecutive shaders run as one chain on the GPU
+        let n = fx[i..].iter().take_while(|f| matches!(f, PixelFx::Shader { .. })).count();
+        if n > 0 {
+            run_shaders(&mut img, &fx[i..i + n], density, time, gpu)?;
+            i += n;
+        } else {
+            run(&mut img, &fx[i], density, time);
+            i += 1;
+        }
     }
 
     let mut out = Pixmap::from_vec(vec![0; w * h * 4], IntSize::from_wh(w as u32, h as u32).unwrap()).unwrap();
@@ -92,11 +122,13 @@ fn extent(f: &PixelFx, density: f32) -> f32 {
         PixelFx::Shadow { x, y, blur, .. } => {
             blur_extent(blur * density) + (x.abs().max(y.abs()) * density).ceil()
         }
+        PixelFx::Shader { margin, .. } => (margin * density).ceil(),
         _ => 0.0,
     }
 }
 
-fn run(img: &mut Img, f: &PixelFx, d: f32, t: f64) {
+fn run(img: &mut Img, f: &PixelFx, d: f32, time: FxTime) {
+    let t = time.global;
     match *f {
         PixelFx::Brightness(a) => map_rgb(img, |c| c.map(|v| v * a)),
         PixelFx::Contrast(a) => map_rgb(img, |c| c.map(|v| (v - 0.5) * a + 0.5)),
@@ -139,7 +171,57 @@ fn run(img: &mut Img, f: &PixelFx, d: f32, t: f64) {
         PixelFx::ChromaKey { color, similarity, smoothness, spill } => chroma_key(img, color, similarity, smoothness, spill),
         PixelFx::Rounded(r) => rounded(img, r * d),
         PixelFx::Crop { left, top, right, bottom } => crop(img, left * d, top * d, right * d, bottom * d),
+        PixelFx::Shader { .. } => unreachable!("shaders run in chains"),
     }
+}
+
+fn run_shaders(img: &mut Img, fx: &[PixelFx], d: f32, time: FxTime, gpu: &mut GpuSlot) -> Result<()> {
+    if gpu.is_none() {
+        let g = Gpu::new()?;
+        eprintln!("shaders run on {}", g.adapter);
+        *gpu = Some(g);
+    }
+    let passes: Vec<Pass> = fx
+        .iter()
+        .map(|f| {
+            let PixelFx::Shader { program, params, margin } = f else { unreachable!() };
+            Pass {
+                program,
+                params,
+                uniforms: Uniforms {
+                    time: time.layer as f32,
+                    global_time: time.global as f32,
+                    frame: (time.global * time.fps).round() as f32,
+                    density: d,
+                    resolution: [img.w as f32, img.h as f32],
+                    size: [img.content.w / d, img.content.h / d],
+                    margin: margin * d,
+                },
+            }
+        })
+        .collect();
+    let mut bytes = to_rgba8(img);
+    gpu.as_mut().unwrap().run(&passes, &mut bytes, img.w as u32, img.h as u32)?;
+    from_rgba8(img, &bytes);
+    Ok(())
+}
+
+fn to_rgba8(img: &Img) -> Vec<u8> {
+    let mut out = vec![0u8; img.w * img.h * 4];
+    out.par_chunks_mut(4).zip(img.px.par_iter()).for_each(|(d, p)| {
+        let a = p[3].clamp(0.0, 1.0);
+        for i in 0..3 {
+            d[i] = (p[i].clamp(0.0, a) * 255.0 + 0.5) as u8;
+        }
+        d[3] = (a * 255.0 + 0.5) as u8;
+    });
+    out
+}
+
+fn from_rgba8(img: &mut Img, bytes: &[u8]) {
+    img.px.par_iter_mut().zip(bytes.par_chunks(4)).for_each(|(p, b)| {
+        *p = [b[0] as f32 / 255.0, b[1] as f32 / 255.0, b[2] as f32 / 255.0, b[3] as f32 / 255.0];
+    });
 }
 
 // ---------- color ----------
@@ -505,6 +587,8 @@ fn crop(img: &mut Img, left: f32, top: f32, right: f32, bottom: f32) {
 mod tests {
     use super::*;
 
+    const T0: FxTime = FxTime { layer: 0.0, global: 0.0, fps: 30.0 };
+
     fn solid(w: u32, h: u32, rgba: [u8; 4]) -> Pixmap {
         let mut p = Pixmap::new(w, h).unwrap();
         for px in p.data_mut().chunks_exact_mut(4) {
@@ -520,7 +604,7 @@ mod tests {
     #[test]
     fn blur_grows_and_keeps_total_alpha() {
         let src = solid(20, 20, [255, 255, 255, 255]);
-        let out = apply(&src, full(&src), &[PixelFx::Blur(6.0)], 1.0, 0.0).unwrap();
+        let out = apply(&src, full(&src), &[PixelFx::Blur(6.0)], 1.0, T0, &mut None).unwrap();
         assert!(out.grow > 0.0);
         let total: f64 = out.pixmap.data().chunks_exact(4).map(|p| p[3] as f64).sum();
         let expected = 20.0 * 20.0 * 255.0;
@@ -530,7 +614,7 @@ mod tests {
     #[test]
     fn grayscale_makes_channels_equal() {
         let src = solid(4, 4, [200, 50, 10, 255]);
-        let out = apply(&src, full(&src), &[PixelFx::Grayscale(1.0)], 1.0, 0.0).unwrap();
+        let out = apply(&src, full(&src), &[PixelFx::Grayscale(1.0)], 1.0, T0, &mut None).unwrap();
         let p = &out.pixmap.data()[0..4];
         assert_eq!(p[0], p[1]);
         assert_eq!(p[1], p[2]);
@@ -539,17 +623,17 @@ mod tests {
     #[test]
     fn chroma_key_removes_green_only() {
         let green = solid(2, 2, [0, 255, 0, 255]);
-        let out = apply(&green, full(&green), &[PixelFx::ChromaKey { color: [0.0, 1.0, 0.0, 1.0], similarity: 0.25, smoothness: 0.08, spill: 0.5 }], 1.0, 0.0).unwrap();
+        let out = apply(&green, full(&green), &[PixelFx::ChromaKey { color: [0.0, 1.0, 0.0, 1.0], similarity: 0.25, smoothness: 0.08, spill: 0.5 }], 1.0, T0, &mut None).unwrap();
         assert_eq!(out.pixmap.data()[3], 0);
         let red = solid(2, 2, [255, 0, 0, 255]);
-        let out = apply(&red, full(&red), &[PixelFx::ChromaKey { color: [0.0, 1.0, 0.0, 1.0], similarity: 0.25, smoothness: 0.08, spill: 0.5 }], 1.0, 0.0).unwrap();
+        let out = apply(&red, full(&red), &[PixelFx::ChromaKey { color: [0.0, 1.0, 0.0, 1.0], similarity: 0.25, smoothness: 0.08, spill: 0.5 }], 1.0, T0, &mut None).unwrap();
         assert_eq!(out.pixmap.data()[3], 255);
     }
 
     #[test]
     fn rounded_clears_corners() {
         let src = solid(100, 100, [255, 255, 255, 255]);
-        let out = apply(&src, full(&src), &[PixelFx::Rounded(30.0)], 1.0, 0.0).unwrap();
+        let out = apply(&src, full(&src), &[PixelFx::Rounded(30.0)], 1.0, T0, &mut None).unwrap();
         let d = out.pixmap.data();
         assert_eq!(d[3], 0); // top-left corner
         assert_eq!(d[(50 * 100 + 50) * 4 + 3], 255); // center
@@ -588,7 +672,7 @@ mod bench {
             let n = 10;
             let t = Instant::now();
             for f in 0..n {
-                apply(&src, rect, &fx, 1.0, f as f64).unwrap();
+                apply(&src, rect, &fx, 1.0, FxTime { layer: f as f64, global: f as f64, fps: 30.0 }, &mut None).unwrap();
             }
             eprintln!("{name:<14} {:>6.1} ms", t.elapsed().as_secs_f64() * 1000.0 / n as f64);
         }

@@ -3,6 +3,7 @@
 mod audio;
 mod decode;
 mod encode;
+mod gpu;
 mod pixel;
 mod text;
 
@@ -14,7 +15,7 @@ use crate::time;
 use anyhow::{bail, Context, Result};
 use decode::VideoDecoder;
 use encode::{EncodeSettings, Encoder, Format};
-use pixel::ContentRect;
+use pixel::{ContentRect, FxTime, GpuSlot};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -119,7 +120,7 @@ pub fn run(project: &Project, opts: Options) -> Result<()> {
         }
     }
 
-    let ctx = Ctx { fps, k, canvas: (pw as f64, ph as f64) };
+    let ctx = Ctx { fps, gpu: Default::default(), k, canvas: (pw as f64, ph as f64) };
     let mut canvas = Pixmap::new(ow, oh).context("invalid output size")?;
 
     // audio first: it is quick, and the encoder needs the whole mix as an input
@@ -183,6 +184,7 @@ pub fn run(project: &Project, opts: Options) -> Result<()> {
 
 struct Ctx {
     fps: f64,
+    gpu: std::cell::RefCell<GpuSlot>,
     /// Output pixels per project pixel.
     k: f64,
     canvas: (f64, f64),
@@ -233,6 +235,7 @@ impl Runtime {
         }
 
         let (w, h) = ctx.canvas;
+        let layer_t = t - self.span.start;
 
         // plain color fill: no image needed unless pixel effects want one
         if self.span.kind == LayerType::Color && st.fx.is_empty() {
@@ -314,7 +317,8 @@ impl Runtime {
         if st.fx.is_empty() {
             draw_pixmap(canvas, pix, base_tr.pre_concat(to_content), st.opacity);
         } else {
-            let out = pixel::apply(pix, content, &st.fx, density as f32, t)?;
+            let time = FxTime { layer: layer_t, global: t, fps: ctx.fps };
+            let out = pixel::apply(pix, content, &st.fx, density as f32, time, &mut ctx.gpu.borrow_mut())?;
             let tr = base_tr.pre_concat(to_content).pre_translate(-out.grow, -out.grow);
             draw_pixmap(canvas, &out.pixmap, tr, st.opacity);
         }

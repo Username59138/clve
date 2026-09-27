@@ -39,6 +39,7 @@ pub struct Env {
 }
 
 pub struct Script {
+    root: PathBuf,
     lua: Lua,
     frame: Function,
     methods: Table,
@@ -158,6 +159,7 @@ impl Script {
             _ => return Err(anyhow!("layers/{}/layer.lua: `frame` must be a function", span.name)),
         };
         Ok(Some(Script {
+            root: env.root.clone(),
             lua,
             frame,
             methods,
@@ -178,7 +180,7 @@ impl Script {
         self.deadline.set(None);
         res.map_err(lua_err)?;
 
-        read_back(&tbl, st)
+        read_back(&tbl, st, &self.root)
     }
 
     fn to_table(&self, st: &LayerState) -> mlua::Result<Table> {
@@ -221,7 +223,7 @@ impl Script {
     }
 }
 
-fn read_back(t: &Table, st: &mut LayerState) -> Result<()> {
+fn read_back(t: &Table, st: &mut LayerState, root: &Path) -> Result<()> {
     let num = |key: &str| -> Result<f64> {
         match t.raw_get::<Value>(key).map_err(lua_err)? {
             Value::Integer(i) => Ok(i as f64),
@@ -274,12 +276,44 @@ fn read_back(t: &Table, st: &mut LayerState) -> Result<()> {
         }
         other => return Err(anyhow!("layer.anchor must be a name or {{x, y}}, got {}", other.type_name())),
     };
-    st.fx = read_fx(t)?;
+    st.fx = read_fx(t, root)?;
     Ok(())
 }
 
+/// A shader effect: compile (cached) and pack its parameters.
+fn shader_fx(root: &Path, entry: &Table, name: &str, src: &str, vals: &std::collections::HashMap<String, Val>) -> Result<fx::PixelFx> {
+    let margin: f64 = entry.get("margin").map_err(lua_err)?;
+    if !(0.0..=2000.0).contains(&margin) {
+        return Err(anyhow!("effect '{name}': margin must be between 0 and 2000 pixels"));
+    }
+    let chunk: String = entry.get("chunk").map_err(lua_err)?;
+    // "@effects/wave.lua" is a file in the project; "=effect 'x'" is built in
+    let (file, text) = match chunk.strip_prefix('@') {
+        Some(rel) => (rel.to_string(), std::fs::read_to_string(root.join(rel)).ok()),
+        None => (format!("effect '{name}'"), None),
+    };
+    let origin = crate::shader::Origin { file: &file, file_text: text.as_deref() };
+    // parameter types come from the effect's defaults, not from what was passed
+    let defaults_tbl: Table = entry.get("defaults").map_err(lua_err)?;
+    let mut defaults = std::collections::HashMap::new();
+    for pair in defaults_tbl.pairs::<String, Value>() {
+        let (k, v) = pair.map_err(lua_err)?;
+        let v = match v {
+            Value::Integer(i) => Val::Num(i as f64),
+            Value::Number(n) => Val::Num(n),
+            Value::Boolean(_) => Val::Num(0.0),
+            Value::String(s) => Val::Str(s.to_str().map_err(lua_err)?.to_string()),
+            other => return Err(anyhow!("effect '{name}': default for {k} must be a number, a color or true/false, got {}", other.type_name())),
+        };
+        defaults.insert(k, v);
+    }
+    let program = crate::shader::program(name, src, &defaults, &origin)?;
+    let params = program.pack(vals)?;
+    Ok(fx::PixelFx::Shader { program, params, margin: margin as f32 })
+}
+
 /// Pixel effects recorded by layer:effect() during this frame.
-fn read_fx(t: &Table) -> Result<Vec<fx::PixelFx>> {
+fn read_fx(t: &Table, root: &Path) -> Result<Vec<fx::PixelFx>> {
     let list = match t.raw_get::<Value>("__fx").map_err(lua_err)? {
         Value::Table(l) => l,
         _ => return Ok(Vec::new()),
@@ -288,6 +322,7 @@ fn read_fx(t: &Table) -> Result<Vec<fx::PixelFx>> {
     for entry in list.sequence_values::<Table>() {
         let entry = entry.map_err(lua_err)?;
         let name: String = entry.get("name").map_err(lua_err)?;
+        let shader: Option<String> = entry.get("shader").map_err(lua_err)?;
         let params: Table = entry.get("params").map_err(lua_err)?;
         let mut vals = std::collections::HashMap::new();
         for pair in params.pairs::<String, Value>() {
@@ -296,6 +331,8 @@ fn read_fx(t: &Table) -> Result<Vec<fx::PixelFx>> {
                 Value::Integer(i) => Val::Num(i as f64),
                 Value::Number(n) => Val::Num(n),
                 Value::String(s) => Val::Str(s.to_str().map_err(lua_err)?.to_string()),
+                // handy for switches in shaders: true = 1, false = 0
+                Value::Boolean(b) if shader.is_some() => Val::Num(if b { 1.0 } else { 0.0 }),
                 other => {
                     return Err(anyhow!(
                         "effect '{name}': {k} must be a number or a string, got {}",
@@ -305,7 +342,10 @@ fn read_fx(t: &Table) -> Result<Vec<fx::PixelFx>> {
             };
             vals.insert(k, v);
         }
-        out.push(fx::build(&name, &vals)?);
+        match shader {
+            Some(src) => out.push(shader_fx(root, &entry, &name, &src, &vals)?),
+            None => out.push(fx::build(&name, &vals)?),
+        }
     }
     Ok(out)
 }

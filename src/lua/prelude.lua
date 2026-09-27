@@ -142,10 +142,24 @@ local function get_effect(name)
   local fn, err = load(src, chunk, "t", env)
   if not fn then error(err, 0) end
   fn()
-  if type(env.apply) ~= "function" then
-    error("effect '" .. name .. "' does not define apply(t, layer, params)", 0)
+  local has_apply = type(env.apply) == "function"
+  local has_shader = type(env.shader) == "string"
+  if not has_apply and not has_shader then
+    error("effect '" .. name .. "' defines neither apply(t, layer, params) nor a shader", 0)
   end
-  fx = { apply = env.apply, params = env.params or {} }
+  if env.shader ~= nil and not has_shader then
+    error("effect '" .. name .. "': shader must be a string of WGSL code", 0)
+  end
+  if env.margin ~= nil and type(env.margin) ~= "number" then
+    error("effect '" .. name .. "': margin must be a number of pixels", 0)
+  end
+  fx = {
+    apply = env.apply,
+    params = env.params or {},
+    shader = env.shader,
+    margin = env.margin or 0,
+    chunk = chunk,
+  }
   effect_cache[name] = fx
   return fx
 end
@@ -196,6 +210,24 @@ __clve_layer_methods = {
       end
       p[k] = v
     end
-    fx.apply(__clve_t, self, p)
+    -- apply() runs first and may change the layer or the params the shader gets
+    if fx.apply then
+      fx.apply(__clve_t, self, p)
+    end
+    if fx.shader then
+      local list = rawget(self, "__fx")
+      if list == nil then
+        list = {}
+        rawset(self, "__fx", list)
+      end
+      list[#list + 1] = {
+        name = name,
+        params = p,
+        shader = fx.shader,
+        defaults = fx.params,
+        margin = fx.margin,
+        chunk = fx.chunk,
+      }
+    end
   end,
 }

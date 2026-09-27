@@ -81,7 +81,7 @@ pub fn layer(kind: LayerType, name: &str, value: &str, copy: bool) -> Result<()>
     Ok(())
 }
 
-pub fn effect(name: &str) -> Result<()> {
+pub fn effect(name: &str, shader: bool) -> Result<()> {
     validate_name(name)?;
     let project = Project::discover()?;
     let dir = project.root.join(EFFECTS_DIR);
@@ -90,8 +90,28 @@ pub fn effect(name: &str) -> Result<()> {
     if path.exists() {
         bail!("effect \"{name}\" already exists (effects/{name}.lua)");
     }
-    std::fs::write(
-        &path,
+    let template = if shader {
+        format!(
+            "-- effect {name}, runs on the GPU\n\
+             -- usage in layer.lua: layer:effect(\"{name}\", {{ amount = 0.5 }})\n\n\
+             -- defaults; numbers become f32, \"#rrggbb\" colors become vec4f, as p.<name>\n\
+             params = {{\n  amount = 1.0,\n  color = \"#ff3366\",\n}}\n\n\
+             -- extra pixels around the layer the shader may draw into\n\
+             margin = 0\n\n\
+             -- optional: runs before the shader and may change the layer or p\n\
+             -- function apply(t, layer, p) end\n\n\
+             -- uv: 0..1 across the layer. sample(uv) reads the layer (straight alpha).\n\
+             -- u.time, u.global_time, u.frame, u.resolution, u.size, u.density, u.margin\n\
+             -- helpers: pixel(xy), luma(rgb), hash(v), noise(v), rotate(v, degrees), PI\n\
+             shader = [[\n\
+             fn effect(uv: vec2f) -> vec4f {{\n\
+             \x20 let c = sample(uv);\n\
+             \x20 let k = p.amount * (0.5 + 0.5 * sin(u.time * 2.0 * PI));\n\
+             \x20 return vec4f(mix(c.rgb, p.color.rgb, k * 0.5), c.a);\n\
+             }}\n\
+             ]]\n"
+        )
+    } else {
         format!(
             "-- effect {name}\n\
              -- usage in layer.lua: layer:effect(\"{name}\", {{ power = 0.5 }})\n\n\
@@ -99,8 +119,9 @@ pub fn effect(name: &str) -> Result<()> {
              params = {{\n  power = 1.0,\n}}\n\n\
              -- t: seconds since the layer started, p: params merged with the defaults\n\
              function apply(t, layer, p)\n  layer.opacity = layer.opacity * p.power\nend\n"
-        ),
-    )?;
+        )
+    };
+    std::fs::write(&path, template)?;
     println!("created effect {name} → effects/{name}.lua");
     Ok(())
 }

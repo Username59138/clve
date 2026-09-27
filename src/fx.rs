@@ -76,6 +76,8 @@ pub enum PixelFx {
     ChromaKey { color: Rgba, similarity: f32, smoothness: f32, spill: f32 },
     Rounded(f32),
     Crop { left: f32, top: f32, right: f32, bottom: f32 },
+    /// A WGSL shader from an effect file; runs on the GPU.
+    Shader { program: std::sync::Arc<crate::shader::Program>, params: Vec<u8>, margin: f32 },
 }
 
 /// A parameter value as it comes from Lua.
