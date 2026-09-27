@@ -9,7 +9,7 @@ mod text;
 
 use crate::check::{self, Span};
 use crate::project::{Fit, LayerType, Project};
-use crate::scene::LayerState;
+use crate::scene::{Blend, LayerState};
 use crate::script::{Env, Script};
 use crate::time;
 use anyhow::{bail, Context, Result};
@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use text::{TextKey, TextRenderer};
 use tiny_skia::{
-    Color, FilterQuality, Paint, Pixmap, PixmapPaint, Rect, Transform,
+    BlendMode, Color, FilterQuality, Paint, Pixmap, PixmapPaint, Rect, Transform,
 };
 
 pub struct Options {
@@ -243,9 +243,27 @@ impl Runtime {
             let mut paint = Paint::default();
             paint.set_color_rgba8(r, g, b, (a as f64 * st.opacity).round() as u8);
             paint.anti_alias = true;
+            paint.blend_mode = blend_mode(st.blend);
             let tr = layer_transform(&st, ctx.k, w, h);
             let rect = Rect::from_xywh(0.0, 0.0, w as f32, h as f32).unwrap();
             canvas.fill_rect(rect, &paint, tr, None);
+            return Ok(());
+        }
+
+        // adjust layer: its effects run over everything drawn so far
+        if self.span.kind == LayerType::Adjust {
+            if st.fx.is_empty() {
+                return Ok(());
+            }
+            let time = FxTime { layer: layer_t, global: t, fps: ctx.fps };
+            let below = canvas.clone();
+            let out = pixel::apply(&below, full_rect(&below), &st.fx, ctx.k as f32, time, &mut ctx.gpu.borrow_mut())?;
+            let tr = Transform::from_translate(-out.grow, -out.grow);
+            if st.opacity >= 1.0 {
+                // replace the frame: effects like chroma_key may make it transparent
+                canvas.fill(Color::TRANSPARENT);
+            }
+            draw_pixmap(canvas, &out.pixmap, tr, st.opacity, Blend::Normal);
             return Ok(());
         }
 
@@ -303,7 +321,7 @@ impl Runtime {
                 let pix = &self.color.as_ref().unwrap().1;
                 (w, h, pix, full_rect(pix), 0.0)
             }
-            LayerType::Audio => return Ok(()),
+            LayerType::Audio | LayerType::Adjust => return Ok(()),
         };
 
         // image pixels → project pixels of the layer (x and y differ for fit = "stretch")
@@ -315,12 +333,12 @@ impl Runtime {
         let base_tr = layer_transform(&st, ctx.k, cw, ch);
 
         if st.fx.is_empty() {
-            draw_pixmap(canvas, pix, base_tr.pre_concat(to_content), st.opacity);
+            draw_pixmap(canvas, pix, base_tr.pre_concat(to_content), st.opacity, st.blend);
         } else {
             let time = FxTime { layer: layer_t, global: t, fps: ctx.fps };
             let out = pixel::apply(pix, content, &st.fx, density as f32, time, &mut ctx.gpu.borrow_mut())?;
             let tr = base_tr.pre_concat(to_content).pre_translate(-out.grow, -out.grow);
-            draw_pixmap(canvas, &out.pixmap, tr, st.opacity);
+            draw_pixmap(canvas, &out.pixmap, tr, st.opacity, st.blend);
         }
         Ok(())
     }
@@ -358,31 +376,54 @@ impl Runtime {
             // decode at the size it will be shown (never bigger than 2x the output)
             let s = ctx.k * quantize(self.base.scale.max(1.0)).min(2.0);
             let (dw, dh) = (even(cw * s), even(ch * s));
-            let offset = t - self.span.start;
+            let (seek, len) = self.span.video_range(t, ctx.fps);
             self.video = Some(VideoDecoder::open(
                 self.span.source.as_ref().unwrap(),
-                self.span.trim_in + offset,
-                self.span.end - t + 1.0,
+                seek,
+                len,
                 ctx.fps,
                 dw,
                 dh,
             )?);
         }
-        self.video.as_mut().unwrap().next()
+        let video = self.video.as_mut().unwrap();
+        // hold_start: keep showing the first frame until the source starts playing
+        const EPS: f64 = 1e-9;
+        if t + EPS < self.span.start + self.span.hold {
+            return video.first();
+        }
+        video.next()
     }
 }
 
 /// Maps layer content (0..cw, 0..ch in project pixels) to output pixels:
 /// move the anchor to (x, y), rotate and scale around it.
 fn layer_transform(st: &LayerState, k: f64, cw: f64, ch: f64) -> Transform {
+    let fx = if st.flip_x { -1.0 } else { 1.0 };
+    let fy = if st.flip_y { -1.0 } else { 1.0 };
     Transform::from_scale(k as f32, k as f32)
         .pre_translate(st.x as f32, st.y as f32)
         .pre_rotate(st.rotation as f32)
         .pre_scale(st.scale as f32, st.scale as f32)
         .pre_translate((-st.anchor.0 * cw) as f32, (-st.anchor.1 * ch) as f32)
+        // mirror inside the layer's box, so the anchor stays where it is
+        .pre_translate(if st.flip_x { cw as f32 } else { 0.0 }, if st.flip_y { ch as f32 } else { 0.0 })
+        .pre_scale(fx, fy)
 }
 
-fn draw_pixmap(canvas: &mut Pixmap, pix: &Pixmap, tr: Transform, opacity: f64) {
+fn blend_mode(b: Blend) -> BlendMode {
+    match b {
+        Blend::Normal => BlendMode::SourceOver,
+        Blend::Screen => BlendMode::Screen,
+        Blend::Add => BlendMode::Plus,
+        Blend::Multiply => BlendMode::Multiply,
+        Blend::Lighten => BlendMode::Lighten,
+        Blend::Darken => BlendMode::Darken,
+        Blend::Overlay => BlendMode::Overlay,
+    }
+}
+
+fn draw_pixmap(canvas: &mut Pixmap, pix: &Pixmap, tr: Transform, opacity: f64, blend: Blend) {
     // pixel-aligned copies don't need filtering
     let aligned = tr.sx == 1.0
         && tr.sy == 1.0
@@ -393,7 +434,7 @@ fn draw_pixmap(canvas: &mut Pixmap, pix: &Pixmap, tr: Transform, opacity: f64) {
     let paint = PixmapPaint {
         opacity: opacity.clamp(0.0, 1.0) as f32,
         quality: if aligned { FilterQuality::Nearest } else { FilterQuality::Bilinear },
-        ..Default::default()
+        blend_mode: blend_mode(blend),
     };
     canvas.draw_pixmap(0, 0, pix.as_ref(), &paint, tr, None);
 }
@@ -493,5 +534,54 @@ fn human(secs: f64) -> String {
         format!("{}m{:02}s", s / 60, s % 60)
     } else {
         format!("{s}s")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::{LayerConfig, LayerType};
+    use tiny_skia::Point;
+
+    fn state(flip_x: bool, flip_y: bool) -> LayerState {
+        let c = LayerConfig {
+            kind: LayerType::Image,
+            duration: "1s".into(),
+            x: Some(100.0),
+            y: Some(50.0),
+            anchor: Some("top-left".into()),
+            flip_x: Some(flip_x),
+            flip_y: Some(flip_y),
+            ..Default::default()
+        };
+        LayerState::from_config(&c, (640, 360)).unwrap()
+    }
+
+    fn map(st: &LayerState, x: f32, y: f32) -> (f32, f32) {
+        let mut p = [Point::from_xy(x, y)];
+        layer_transform(st, 1.0, 40.0, 20.0).map_points(&mut p);
+        (p[0].x, p[0].y)
+    }
+
+    #[test]
+    fn flip_x_mirrors_inside_the_box() {
+        let st = state(true, false);
+        // the left edge of the content lands on the right edge, the box stays put
+        assert_eq!(map(&st, 0.0, 0.0), (140.0, 50.0));
+        assert_eq!(map(&st, 40.0, 20.0), (100.0, 70.0));
+    }
+
+    #[test]
+    fn flip_y_mirrors_only_vertically() {
+        let st = state(false, true);
+        assert_eq!(map(&st, 0.0, 0.0), (100.0, 70.0));
+        assert_eq!(map(&st, 40.0, 20.0), (140.0, 50.0));
+    }
+
+    #[test]
+    fn no_flip_is_unchanged() {
+        let st = state(false, false);
+        assert_eq!(map(&st, 0.0, 0.0), (100.0, 50.0));
+        assert_eq!(map(&st, 40.0, 20.0), (140.0, 70.0));
     }
 }

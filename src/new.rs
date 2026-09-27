@@ -68,6 +68,11 @@ pub fn layer(kind: LayerType, name: &str, value: &str, copy: bool) -> Result<()>
         LayerType::Color => {
             cfg.color = Some(value.into());
         }
+        LayerType::Adjust => {
+            // the value is how long it lasts: clve new layer adjust fx 5s
+            crate::time::parse(value).map_err(|e| anyhow::anyhow!("adjust layer duration \"{value}\": {e}"))?;
+            cfg.duration = value.into();
+        }
     }
 
     std::fs::create_dir_all(&dir)?;
@@ -181,6 +186,7 @@ fn lua_template(kind: LayerType) -> String {
         LayerType::Text => "  -- layer.text = typewriter(layer.content, t, 0.05)\n",
         LayerType::Color => "  -- layer.color = mix_color(\"#101010\", \"#303060\", progress(t, 0, clip.duration))\n",
         LayerType::Image => "  -- layer:effect(\"pop\")\n",
+        LayerType::Adjust => "  -- effects here apply to every layer below this one\n  -- layer:effect(\"pixelate\", { size = 8 })\n",
     };
     let common = if kind == LayerType::Audio {
         ""

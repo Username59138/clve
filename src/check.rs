@@ -20,6 +20,12 @@ pub struct Span {
     /// Offset into the source file, seconds.
     #[serde(rename = "in")]
     pub trim_in: f64,
+    /// Where the source stops, seconds; after it the last frame is held.
+    #[serde(rename = "out", skip_serializing_if = "Option::is_none")]
+    pub trim_out: Option<f64>,
+    /// Seconds the first frame is held (silent) before the source plays.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub hold: f64,
     #[serde(skip)]
     pub dir: PathBuf,
     #[serde(skip)]
@@ -31,6 +37,40 @@ pub struct Span {
     pub image_size: Option<(u32, u32)>,
     #[serde(skip)]
     pub state: Option<LayerState>,
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
+}
+
+impl Span {
+    /// Seconds into the source at timeline time `t` (during the hold: the first frame).
+    pub fn source_time(&self, t: f64) -> f64 {
+        self.trim_in + (t - self.start - self.hold).max(0.0)
+    }
+
+    /// How many seconds of source to decode from timeline time `t` on
+    /// (0 once `out` has passed: nothing is left to play).
+    pub fn decode_len(&self, t: f64) -> f64 {
+        let rest = self.end - t + 1.0;
+        match self.trim_out {
+            Some(out) => rest.min((out - self.source_time(t)).max(0.0)),
+            None => rest,
+        }
+    }
+
+    /// Where to start a video decoder at time `t`, and for how long. Past `out`
+    /// it decodes just the last frame of the piece, which is then held.
+    pub fn video_range(&self, t: f64, fps: f64) -> (f64, f64) {
+        let frame = 1.0 / fps;
+        match self.trim_out {
+            Some(out) if self.source_time(t) > out - frame => {
+                let seek = (out - frame).max(self.trim_in);
+                (seek, out - seek)
+            }
+            _ => (self.source_time(t), self.decode_len(t)),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -233,7 +273,46 @@ fn resolve(project: &Project, layer: &Layer, r: &mut Report) -> Option<Span> {
     if trim_in > 0.0 && !c.kind.has_natural_duration() {
         r.warn(Some(name), format!("in has no effect on a layer of type {}", c.kind));
     }
-    let source_len = media.as_ref().map(|m| m.duration);
+    let trim_out = match c.trim_out.as_deref().map(time::parse).transpose() {
+        Ok(v) => v,
+        Err(e) => {
+            r.err(Some(name), format!("out: {e}"));
+            return None;
+        }
+    };
+    if let Some(out) = trim_out {
+        if !c.kind.has_natural_duration() {
+            r.warn(Some(name), format!("out has no effect on a layer of type {}", c.kind));
+        } else if out <= trim_in {
+            r.err(Some(name), format!("out = {} must be after in = {}", time::format(out), time::format(trim_in)));
+            return None;
+        }
+    }
+    let trim_out = if c.kind.has_natural_duration() { trim_out } else { None };
+    let hold = match c.hold_start.as_deref().map(time::parse).transpose() {
+        Ok(v) => v.unwrap_or(0.0),
+        Err(e) => {
+            r.err(Some(name), format!("hold_start: {e}"));
+            return None;
+        }
+    };
+    if hold > 0.0 && !c.kind.has_natural_duration() {
+        r.warn(Some(name), format!("hold_start has no effect on a layer of type {}", c.kind));
+    }
+    let hold = if c.kind.has_natural_duration() { hold } else { 0.0 };
+    if c.kind != LayerType::Video && c.kind != LayerType::Audio
+        && (c.lowpass.unwrap_or(0.0) > 0.0 || c.highpass.unwrap_or(0.0) > 0.0)
+    {
+        r.warn(Some(name), format!("lowpass/highpass have no effect on a layer of type {}", c.kind));
+    }
+    if c.kind == LayerType::Adjust && c.blend.is_some() {
+        r.warn(Some(name), "blend has no effect on an adjust layer");
+    }
+    // `out` shortens the source like a shorter file would
+    let source_len = media.as_ref().map(|m| match trim_out {
+        Some(out) => out.min(m.duration),
+        None => m.duration,
+    });
 
     let duration = if c.duration.trim() == "full" {
         if !c.kind.has_natural_duration() {
@@ -258,17 +337,18 @@ fn resolve(project: &Project, layer: &Layer, r: &mut Report) -> Option<Span> {
             );
             return None;
         }
-        len - trim_in
+        hold + len - trim_in
     } else {
         match time::parse(&c.duration) {
             Ok(d) if d > 0.0 => {
-                if let Some(len) = source_len {
-                    if trim_in + d > len + 0.05 {
+                // with `out` the hold at the end is on purpose, no warning
+                if let (Some(len), None) = (source_len, trim_out) {
+                    if trim_in + (d - hold) > len + 0.05 {
                         r.warn(
                             Some(name),
                             format!(
                                 "source is too short: needs {} from {}, file has {} (last frame will be held)",
-                                time::format(d),
+                                time::format(d - hold),
                                 time::format(trim_in),
                                 time::format(len)
                             ),
@@ -295,6 +375,8 @@ fn resolve(project: &Project, layer: &Layer, r: &mut Report) -> Option<Span> {
         start,
         end: start + duration,
         trim_in,
+        trim_out,
+        hold,
         dir: layer.dir.clone(),
         source,
         media,
@@ -341,5 +423,55 @@ fn find_overlaps(r: &mut Report) {
     }
     for m in found {
         r.err(None, m);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn span(start: f64, end: f64, trim_in: f64, trim_out: Option<f64>, hold: f64) -> Span {
+        Span {
+            name: "x".into(),
+            kind: LayerType::Video,
+            z: 0,
+            start,
+            end,
+            trim_in,
+            trim_out,
+            hold,
+            dir: PathBuf::new(),
+            source: None,
+            media: None,
+            image_size: None,
+            state: None,
+        }
+    }
+
+    #[test]
+    fn hold_start_keeps_the_first_frame() {
+        let s = span(2.0, 6.0, 1.0, None, 0.5);
+        assert_eq!(s.source_time(2.0), 1.0);
+        assert_eq!(s.source_time(2.4), 1.0);
+        assert_eq!(s.source_time(3.5), 2.0);
+    }
+
+    #[test]
+    fn out_limits_what_is_decoded() {
+        let s = span(0.0, 10.0, 1.0, Some(3.0), 0.0);
+        assert_eq!(s.decode_len(0.0), 2.0);
+        assert_eq!(s.decode_len(1.5), 0.5);
+        // past `out` nothing more is read: the last frame is held
+        assert_eq!(s.decode_len(5.0), 0.0);
+        let free = span(0.0, 10.0, 1.0, None, 0.0);
+        assert_eq!(free.decode_len(4.0), 7.0);
+    }
+
+    #[test]
+    fn starting_after_out_shows_the_last_frame() {
+        let s = span(0.0, 10.0, 1.0, Some(3.0), 0.0);
+        let (seek, len) = s.video_range(5.0, 25.0);
+        assert!((seek - 2.96).abs() < 1e-9 && (len - 0.04).abs() < 1e-9);
+        assert_eq!(s.video_range(0.5, 25.0), (1.5, 1.5));
     }
 }

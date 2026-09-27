@@ -5,7 +5,7 @@
 use crate::check::Span;
 use crate::fx::{self, Def, Val};
 use crate::project::EFFECTS_DIR;
-use crate::scene::{parse_anchor, parse_color, Align, LayerState};
+use crate::scene::{parse_anchor, parse_color, Align, Blend, LayerState};
 use anyhow::{anyhow, Result};
 use mlua::{Function, HookTriggers, Lua, LuaOptions, StdLib, Table, Value, VmState};
 use std::cell::Cell;
@@ -216,6 +216,11 @@ impl Script {
             format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
         };
         t.set("color", color)?;
+        t.set("flip_x", st.flip_x)?;
+        t.set("flip_y", st.flip_y)?;
+        t.set("blend", st.blend.name())?;
+        t.set("lowpass", st.lowpass)?;
+        t.set("highpass", st.highpass)?;
         let meta = self.lua.create_table()?;
         meta.set("__index", self.methods.clone())?;
         t.set_metatable(Some(meta))?;
@@ -241,9 +246,30 @@ fn read_back(t: &Table, st: &mut LayerState, root: &Path) -> Result<()> {
         }
     };
 
+    let boolean = |key: &str| -> Result<bool> {
+        match t.raw_get::<Value>(key).map_err(lua_err)? {
+            Value::Boolean(b) => Ok(b),
+            Value::Nil => Ok(false),
+            other => Err(anyhow!("layer.{key} must be true or false, got {}", other.type_name())),
+        }
+    };
+
     st.x = num("x")?;
     st.y = num("y")?;
     st.scale = num("scale")?;
+    st.flip_x = boolean("flip_x")?;
+    st.flip_y = boolean("flip_y")?;
+    // a negative scale mirrors left to right, like flip_x
+    if st.scale < 0.0 {
+        st.scale = -st.scale;
+        st.flip_x = !st.flip_x;
+    }
+    st.blend = Blend::parse(&string("blend")?).map_err(|e| anyhow!("layer.{e}"))?;
+    st.lowpass = num("lowpass")?;
+    st.highpass = num("highpass")?;
+    if st.lowpass < 0.0 || st.highpass < 0.0 {
+        return Err(anyhow!("layer.lowpass and layer.highpass must be 0 (off) or a frequency in Hz"));
+    }
     st.rotation = num("rotation")?;
     st.opacity = num("opacity")?.clamp(0.0, 1.0);
     st.volume = num("volume")?.max(0.0);

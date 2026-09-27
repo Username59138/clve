@@ -23,6 +23,8 @@ struct Track {
     decoder: Option<PcmDecoder>,
     /// Gain at the end of the previous frame, per channel.
     prev: Option<(f32, f32)>,
+    lowpass: Biquad,
+    highpass: Biquad,
 }
 
 /// Mixes all audio of the project in [from, to) into `out`.
@@ -45,6 +47,8 @@ pub fn mix(spans: &[Span], env: &Env, from: f64, to: f64, frames: u64, out: &Pat
             script,
             decoder: None,
             prev: None,
+            lowpass: Biquad::default(),
+            highpass: Biquad::default(),
         });
     }
     if tracks.is_empty() {
@@ -85,16 +89,32 @@ pub fn mix(spans: &[Span], env: &Env, from: f64, to: f64, frames: u64, out: &Pat
             let prev = tr.prev.unwrap_or(gain);
             tr.prev = Some(gain);
 
-            if tr.decoder.is_none() {
-                tr.decoder = Some(PcmDecoder::open(
-                    tr.span.source.as_ref().unwrap(),
-                    tr.span.trim_in + (t - tr.span.start),
-                    tr.span.end - t + 1.0,
-                )?);
-            }
             src_buf.clear();
             src_buf.resize(n * CHANNELS, 0.0);
-            tr.decoder.as_mut().unwrap().read(&mut src_buf)?;
+            // hold_start: silence until the source starts playing
+            let play_at = tr.span.start + tr.span.hold;
+            let done = tr.span.trim_out.is_some_and(|out| tr.span.source_time(t) >= out);
+            if done {
+                // past `out`: silence
+            } else if t + EPS >= play_at {
+                if tr.decoder.is_none() {
+                    tr.decoder = Some(PcmDecoder::open(
+                        tr.span.source.as_ref().unwrap(),
+                        tr.span.source_time(t),
+                        tr.span.decode_len(t),
+                    )?);
+                }
+                tr.decoder.as_mut().unwrap().read(&mut src_buf)?;
+            } else {
+                // a hold that ends inside this frame: start the source mid-frame
+                let skip = (((play_at - t) * RATE as f64).round() as usize).min(n);
+                if skip < n {
+                    tr.decoder = Some(PcmDecoder::open(tr.span.source.as_ref().unwrap(), tr.span.trim_in, tr.span.decode_len(play_at))?);
+                    tr.decoder.as_mut().unwrap().read(&mut src_buf[skip * CHANNELS..])?;
+                }
+            }
+            tr.lowpass.run(&mut src_buf, Kind::Lowpass, st.lowpass);
+            tr.highpass.run(&mut src_buf, Kind::Highpass, st.highpass);
 
             if gain == (0.0, 0.0) && prev == (0.0, 0.0) {
                 continue;
@@ -111,6 +131,62 @@ pub fn mix(spans: &[Span], env: &Env, from: f64, to: f64, frames: u64, out: &Pat
     }
     wav.finish()?;
     Ok(true)
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Kind {
+    Lowpass,
+    Highpass,
+}
+
+/// A second-order (12 dB/octave) filter on interleaved stereo, RBJ cookbook.
+/// The cutoff may change every frame; the state carries over so it stays smooth.
+#[derive(Default)]
+struct Biquad {
+    cutoff: f64,
+    c: [f32; 5],
+    /// x1, x2, y1, y2 per channel
+    z: [[f32; 4]; CHANNELS],
+}
+
+impl Biquad {
+    fn set(&mut self, kind: Kind, cutoff: f64) {
+        if cutoff == self.cutoff {
+            return;
+        }
+        self.cutoff = cutoff;
+        let f = cutoff.clamp(10.0, RATE as f64 * 0.45);
+        let w = 2.0 * std::f64::consts::PI * f / RATE as f64;
+        let (sin, cos) = w.sin_cos();
+        let alpha = sin / (2.0 * std::f64::consts::FRAC_1_SQRT_2);
+        let (b0, b1, b2) = match kind {
+            Kind::Lowpass => ((1.0 - cos) / 2.0, 1.0 - cos, (1.0 - cos) / 2.0),
+            Kind::Highpass => ((1.0 + cos) / 2.0, -(1.0 + cos), (1.0 + cos) / 2.0),
+        };
+        let a0 = 1.0 + alpha;
+        let (a1, a2) = (-2.0 * cos, 1.0 - alpha);
+        self.c = [(b0 / a0) as f32, (b1 / a0) as f32, (b2 / a0) as f32, (a1 / a0) as f32, (a2 / a0) as f32];
+    }
+
+    /// `cutoff` 0 means off (the filter state is reset).
+    fn run(&mut self, buf: &mut [f32], kind: Kind, cutoff: f64) {
+        if cutoff <= 0.0 {
+            if self.cutoff != 0.0 {
+                *self = Biquad::default();
+            }
+            return;
+        }
+        self.set(kind, cutoff);
+        let [b0, b1, b2, a1, a2] = self.c;
+        for frame in buf.chunks_exact_mut(CHANNELS) {
+            for (ch, x) in frame.iter_mut().enumerate() {
+                let [x1, x2, y1, y2] = self.z[ch];
+                let y = b0 * *x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+                self.z[ch] = [*x, x1, y, y1];
+                *x = y;
+            }
+        }
+    }
 }
 
 /// Decodes any audio to interleaved stereo f32 at 48 kHz.
@@ -228,5 +304,46 @@ pub struct TempFile(pub PathBuf);
 impl Drop for TempFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RMS of a sine after filtering, skipping the settling time.
+    fn rms_after(kind: Kind, cutoff: f64, freq: f64) -> f32 {
+        let n = RATE as usize / 2;
+        let mut buf: Vec<f32> = (0..n)
+            .flat_map(|i| {
+                let v = (2.0 * std::f64::consts::PI * freq * i as f64 / RATE as f64).sin() as f32;
+                [v, v]
+            })
+            .collect();
+        let mut f = Biquad::default();
+        f.run(&mut buf, kind, cutoff);
+        let tail = &buf[n..];
+        (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn lowpass_keeps_bass_and_cuts_treble() {
+        let full = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((rms_after(Kind::Lowpass, 1000.0, 100.0) - full).abs() < 0.02);
+        assert!(rms_after(Kind::Lowpass, 1000.0, 10_000.0) < full * 0.02);
+    }
+
+    #[test]
+    fn highpass_keeps_treble_and_cuts_bass() {
+        let full = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((rms_after(Kind::Highpass, 1000.0, 10_000.0) - full).abs() < 0.02);
+        assert!(rms_after(Kind::Highpass, 1000.0, 50.0) < full * 0.01);
+    }
+
+    #[test]
+    fn zero_cutoff_is_off() {
+        let mut buf = vec![0.5f32; 64];
+        Biquad::default().run(&mut buf, Kind::Lowpass, 0.0);
+        assert!(buf.iter().all(|v| *v == 0.5));
     }
 }

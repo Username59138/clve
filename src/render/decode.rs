@@ -15,6 +15,8 @@ pub struct VideoDecoder {
     buf: Vec<u8>,
     frame: Pixmap,
     has_frame: bool,
+    /// first() read a frame that next() has not handed out yet.
+    pending: bool,
     eof: bool,
 }
 
@@ -49,12 +51,27 @@ impl VideoDecoder {
             buf: vec![0; (w * h * 4) as usize],
             frame,
             has_frame: false,
+            pending: false,
             eof: false,
         })
     }
 
+    /// The first frame, without moving on (for hold_start).
+    pub fn first(&mut self) -> Result<&Pixmap> {
+        if !self.has_frame {
+            self.next()?;
+            self.pending = true;
+        }
+        Ok(&self.frame)
+    }
+
     /// Next frame. When the source runs out, the last frame is held.
     pub fn next(&mut self) -> Result<&Pixmap> {
+        if self.pending {
+            // the held first frame also starts the playback
+            self.pending = false;
+            return Ok(&self.frame);
+        }
         if !self.eof {
             // read into a side buffer so a truncated last frame never shows up
             match self.stdout.read_exact(&mut self.buf) {

@@ -59,6 +59,8 @@ pub enum LayerType {
     Text,
     Audio,
     Color,
+    /// Applies its pixel effects to everything drawn below it.
+    Adjust,
 }
 
 impl LayerType {
@@ -84,6 +86,7 @@ impl fmt::Display for LayerType {
             LayerType::Text => "text",
             LayerType::Audio => "audio",
             LayerType::Color => "color",
+            LayerType::Adjust => "adjust",
         };
         f.write_str(s)
     }
@@ -133,6 +136,9 @@ pub struct LayerConfig {
     /// Where in the source to start video/audio from.
     #[serde(rename = "in", skip_serializing_if = "Option::is_none")]
     pub trim_in: Option<String>,
+    /// Where in the source to stop; after it the last frame is held, silently.
+    #[serde(rename = "out", skip_serializing_if = "Option::is_none")]
+    pub trim_out: Option<String>,
     /// Height: higher value is drawn on top.
     #[serde(default)]
     pub z: i32,
@@ -166,6 +172,28 @@ pub struct LayerConfig {
     /// text: "left", "center", "right".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub align: Option<String>,
+
+    // ----- mirroring, blending, holding, audio filters -----
+    /// Mirror left to right.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flip_x: Option<bool>,
+    /// Mirror top to bottom.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flip_y: Option<bool>,
+    /// How the layer mixes with what is below: normal, screen, add, multiply,
+    /// lighten, darken, overlay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blend: Option<String>,
+    /// video/audio: show the first frame (and stay silent) this long before
+    /// the source starts playing. The hold is part of `duration`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hold_start: Option<String>,
+    /// video/audio: low-pass filter cutoff in Hz, 0 = off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lowpass: Option<f64>,
+    /// video/audio: high-pass filter cutoff in Hz, 0 = off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub highpass: Option<f64>,
 }
 
 fn zero_time() -> String {
