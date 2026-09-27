@@ -3,6 +3,7 @@
 mod audio;
 mod decode;
 mod encode;
+mod pixel;
 mod text;
 
 use crate::check::{self, Span};
@@ -13,6 +14,7 @@ use crate::time;
 use anyhow::{bail, Context, Result};
 use decode::VideoDecoder;
 use encode::{EncodeSettings, Encoder, Format};
+use pixel::ContentRect;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -194,12 +196,13 @@ struct Runtime {
     video: Option<VideoDecoder>,
     image: Option<Pixmap>,
     text: Option<(TextKey, Option<Pixmap>, f64)>,
+    color: Option<([u8; 4], Pixmap)>,
 }
 
 impl Runtime {
     fn new(span: Span, script: Option<Script>) -> Runtime {
         let base = span.state.clone().expect("check guarantees a valid state");
-        Runtime { span, base, script, video: None, image: None, text: None }
+        Runtime { span, base, script, video: None, image: None, text: None, color: None }
     }
 
     fn draw(&mut self, canvas: &mut Pixmap, t: f64, ctx: &Ctx, text: &mut TextRenderer) -> Result<()> {
@@ -230,22 +233,26 @@ impl Runtime {
         }
 
         let (w, h) = ctx.canvas;
-        match self.span.kind {
-            LayerType::Color => {
-                let [r, g, b, a] = st.color;
-                let mut paint = Paint::default();
-                paint.set_color_rgba8(r, g, b, (a as f64 * st.opacity).round() as u8);
-                paint.anti_alias = true;
-                let tr = layer_transform(&st, ctx.k, w, h);
-                let rect = Rect::from_xywh(0.0, 0.0, w as f32, h as f32).unwrap();
-                canvas.fill_rect(rect, &paint, tr, None);
-            }
+
+        // plain color fill: no image needed unless pixel effects want one
+        if self.span.kind == LayerType::Color && st.fx.is_empty() {
+            let [r, g, b, a] = st.color;
+            let mut paint = Paint::default();
+            paint.set_color_rgba8(r, g, b, (a as f64 * st.opacity).round() as u8);
+            paint.anti_alias = true;
+            let tr = layer_transform(&st, ctx.k, w, h);
+            let rect = Rect::from_xywh(0.0, 0.0, w as f32, h as f32).unwrap();
+            canvas.fill_rect(rect, &paint, tr, None);
+            return Ok(());
+        }
+
+        // Every layer type comes down to: an image, the layer's size in project
+        // pixels (cw, ch), and where the content sits inside the image.
+        let (cw, ch, pix, content, pad): (f64, f64, &Pixmap, ContentRect, f64) = match self.span.kind {
             LayerType::Video => {
                 let (cw, ch) = self.fitted_size(&st, ctx)?;
                 let frame = self.video_frame(t, ctx)?;
-                let (fw, fh) = (frame.width() as f64, frame.height() as f64);
-                let tr = layer_transform(&st, ctx.k, cw, ch).pre_scale((cw / fw) as f32, (ch / fh) as f32);
-                draw_pixmap(canvas, frame, tr, st.opacity);
+                (cw, ch, frame, full_rect(frame), 0.0)
             }
             LayerType::Image => {
                 if self.image.is_none() {
@@ -253,9 +260,7 @@ impl Runtime {
                 }
                 let (cw, ch) = self.fitted_size(&st, ctx)?;
                 let img = self.image.as_ref().unwrap();
-                let (iw, ih) = (img.width() as f64, img.height() as f64);
-                let tr = layer_transform(&st, ctx.k, cw, ch).pre_scale((cw / iw) as f32, (ch / ih) as f32);
-                draw_pixmap(canvas, img, tr, st.opacity);
+                (cw, ch, img, full_rect(img), 0.0)
             }
             LayerType::Text => {
                 // rasterize at the size it will be shown, so scaled-up text stays sharp
@@ -267,19 +272,51 @@ impl Runtime {
                     self.text = Some((key, pix, raster));
                 }
                 let (_, pix, raster) = self.text.as_ref().unwrap();
-                if let Some(pix) = pix {
-                    let pad = (st.size * raster * 0.25).ceil();
-                    let pw = pix.width() as f64;
-                    let ph = pix.height() as f64;
-                    let cw = (pw - pad * 2.0) / raster;
-                    let ch = (ph - pad * 2.0) / raster;
-                    let tr = layer_transform(&st, ctx.k, cw, ch)
-                        .pre_scale((1.0 / raster) as f32, (1.0 / raster) as f32)
-                        .pre_translate(-pad as f32, -pad as f32);
-                    draw_pixmap(canvas, pix, tr, st.opacity);
-                }
+                let Some(pix) = pix else { return Ok(()) };
+                // text images carry a margin for glyphs that poke out of the line box
+                let pad = (st.size * raster * 0.25).ceil();
+                let (pw, ph) = (pix.width() as f64, pix.height() as f64);
+                let content = ContentRect {
+                    x: pad as f32,
+                    y: pad as f32,
+                    w: (pw - 2.0 * pad) as f32,
+                    h: (ph - 2.0 * pad) as f32,
+                };
+                ((pw - 2.0 * pad) / raster, (ph - 2.0 * pad) / raster, pix, content, pad)
             }
-            LayerType::Audio => {}
+            LayerType::Color => {
+                // a frame-sized image of the color, at output resolution
+                let (pw, ph) = ((w * ctx.k).ceil() as u32, (h * ctx.k).ceil() as u32);
+                let stale = self
+                    .color
+                    .as_ref()
+                    .is_none_or(|(c, p)| *c != st.color || p.width() != pw || p.height() != ph);
+                if stale {
+                    let mut p = Pixmap::new(pw, ph).context("invalid color layer size")?;
+                    let [r, g, b, a] = st.color;
+                    p.fill(tiny_skia::Color::from_rgba8(r, g, b, a));
+                    self.color = Some((st.color, p));
+                }
+                let pix = &self.color.as_ref().unwrap().1;
+                (w, h, pix, full_rect(pix), 0.0)
+            }
+            LayerType::Audio => return Ok(()),
+        };
+
+        // image pixels → project pixels of the layer (x and y differ for fit = "stretch")
+        let dx = content.w as f64 / cw;
+        let dy = content.h as f64 / ch;
+        let density = (dx + dy) / 2.0;
+        let to_content = Transform::from_scale((1.0 / dx) as f32, (1.0 / dy) as f32)
+            .pre_translate(-pad as f32, -pad as f32);
+        let base_tr = layer_transform(&st, ctx.k, cw, ch);
+
+        if st.fx.is_empty() {
+            draw_pixmap(canvas, pix, base_tr.pre_concat(to_content), st.opacity);
+        } else {
+            let out = pixel::apply(pix, content, &st.fx, density as f32, t)?;
+            let tr = base_tr.pre_concat(to_content).pre_translate(-out.grow, -out.grow);
+            draw_pixmap(canvas, &out.pixmap, tr, st.opacity);
         }
         Ok(())
     }
@@ -355,6 +392,10 @@ fn draw_pixmap(canvas: &mut Pixmap, pix: &Pixmap, tr: Transform, opacity: f64) {
         ..Default::default()
     };
     canvas.draw_pixmap(0, 0, pix.as_ref(), &paint, tr, None);
+}
+
+fn full_rect(p: &Pixmap) -> ContentRect {
+    ContentRect { x: 0.0, y: 0.0, w: p.width() as f32, h: p.height() as f32 }
 }
 
 /// Rounds a scale up to a quarter step so small changes don't force a re-render.

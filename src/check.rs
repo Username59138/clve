@@ -146,6 +146,10 @@ fn try_scripts(project: &Project, r: &mut Report) {
                 problems.push((span.name.clone(), format!("{e:#} (at t = {})", time::format(t))));
                 break;
             }
+            if span.kind.is_audio_only() && !st.fx.is_empty() {
+                problems.push((span.name.clone(), "pixel effects need a visual layer, this one is audio".into()));
+                break;
+            }
         }
     }
     for (layer, msg) in problems {

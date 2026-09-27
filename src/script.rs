@@ -3,6 +3,7 @@
 //! fresh copy of the layer's properties from layer.toml.
 
 use crate::check::Span;
+use crate::fx::{self, Def, Val};
 use crate::project::EFFECTS_DIR;
 use crate::scene::{parse_anchor, parse_color, Align, LayerState};
 use anyhow::{anyhow, Result};
@@ -112,6 +113,29 @@ impl Script {
             })
             .map_err(lua_err)?;
         g.set("__clve_effect_source", effect_source).map_err(lua_err)?;
+
+        let root = env.root.clone();
+        let has_project_effect = lua
+            .create_function(move |_, name: String| {
+                let ok = !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-');
+                Ok(ok && root.join(EFFECTS_DIR).join(format!("{name}.lua")).is_file())
+            })
+            .map_err(lua_err)?;
+        g.set("__clve_has_project_effect", has_project_effect).map_err(lua_err)?;
+
+        // built-in pixel effects and their defaults
+        let pixel = lua.create_table().map_err(lua_err)?;
+        for spec in fx::SPECS {
+            let defaults = lua.create_table().map_err(lua_err)?;
+            for (key, def) in spec.params {
+                match def {
+                    Def::Num(n) => defaults.set(*key, *n).map_err(lua_err)?,
+                    Def::Color(c) => defaults.set(*key, *c).map_err(lua_err)?,
+                }
+            }
+            pixel.set(spec.name, defaults).map_err(lua_err)?;
+        }
+        g.set("__clve_pixel_fx", pixel).map_err(lua_err)?;
 
         lua.load(PRELUDE).set_name("=clve").exec().map_err(lua_err)?;
         // nothing past this point may load code, touch files or dump bytecode
@@ -250,7 +274,40 @@ fn read_back(t: &Table, st: &mut LayerState) -> Result<()> {
         }
         other => return Err(anyhow!("layer.anchor must be a name or {{x, y}}, got {}", other.type_name())),
     };
+    st.fx = read_fx(t)?;
     Ok(())
+}
+
+/// Pixel effects recorded by layer:effect() during this frame.
+fn read_fx(t: &Table) -> Result<Vec<fx::PixelFx>> {
+    let list = match t.raw_get::<Value>("__fx").map_err(lua_err)? {
+        Value::Table(l) => l,
+        _ => return Ok(Vec::new()),
+    };
+    let mut out = Vec::new();
+    for entry in list.sequence_values::<Table>() {
+        let entry = entry.map_err(lua_err)?;
+        let name: String = entry.get("name").map_err(lua_err)?;
+        let params: Table = entry.get("params").map_err(lua_err)?;
+        let mut vals = std::collections::HashMap::new();
+        for pair in params.pairs::<String, Value>() {
+            let (k, v) = pair.map_err(lua_err)?;
+            let v = match v {
+                Value::Integer(i) => Val::Num(i as f64),
+                Value::Number(n) => Val::Num(n),
+                Value::String(s) => Val::Str(s.to_str().map_err(lua_err)?.to_string()),
+                other => {
+                    return Err(anyhow!(
+                        "effect '{name}': {k} must be a number or a string, got {}",
+                        other.type_name()
+                    ))
+                }
+            };
+            vals.insert(k, v);
+        }
+        out.push(fx::build(&name, &vals)?);
+    }
+    Ok(out)
 }
 
 fn anchor_name(a: (f64, f64)) -> Option<&'static str> {
@@ -284,11 +341,7 @@ fn effect_source(root: &Path, name: &str) -> Result<(String, String), String> {
     match BUILTIN_EFFECTS.iter().find(|(n, _)| *n == name) {
         Some((_, src)) => Ok((src.to_string(), format!("=effect '{name}'"))),
         None => {
-            let names: Vec<&str> = BUILTIN_EFFECTS.iter().map(|(n, _)| *n).collect();
-            Err(format!(
-                "unknown effect '{name}' (built-in: {}; or create effects/{name}.lua)",
-                names.join(", ")
-            ))
+            Err(format!("unknown effect '{name}' (see: clve list effects; or create effects/{name}.lua)"))
         }
     }
 }

@@ -150,9 +150,43 @@ local function get_effect(name)
   return fx
 end
 
+local project_effect = {}
+
+local function has_project_effect(name)
+  local v = project_effect[name]
+  if v == nil then
+    v = __clve_has_project_effect(name)
+    project_effect[name] = v
+  end
+  return v
+end
+
 __clve_layer_methods = {
   -- layer:effect("shake", { amount = 8 })
   effect = function(self, name, params)
+    if params ~= nil and type(params) ~= "table" then
+      error("effect '" .. tostring(name) .. "': params must be a table", 2)
+    end
+    -- built-in pixel effects are only recorded here and run in Rust;
+    -- a project effect with the same name wins
+    local defaults = __clve_pixel_fx[name]
+    if defaults and not has_project_effect(name) then
+      local p = {}
+      for k, v in pairs(defaults) do p[k] = v end
+      for k, v in pairs(params or {}) do
+        if defaults[k] == nil then
+          error(string.format("effect '%s' has no parameter '%s'", name, tostring(k)), 2)
+        end
+        p[k] = v
+      end
+      local list = rawget(self, "__fx")
+      if list == nil then
+        list = {}
+        rawset(self, "__fx", list)
+      end
+      list[#list + 1] = { name = name, params = p }
+      return
+    end
     local fx = get_effect(name)
     local p = {}
     for k, v in pairs(fx.params) do p[k] = v end

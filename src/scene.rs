@@ -1,6 +1,7 @@
 //! Per-frame layer state. Built from layer.toml; later Lua scripts modify it
 //! every frame before the layer is drawn.
 
+use crate::fx::PixelFx;
 use crate::project::{Fit, LayerConfig, LayerType};
 use anyhow::{bail, Result};
 
@@ -34,6 +35,8 @@ pub struct LayerState {
     pub align: Align,
     /// RGBA, straight alpha.
     pub color: [u8; 4],
+    /// Pixel effects for this frame, in call order.
+    pub fx: Vec<PixelFx>,
 }
 
 impl LayerState {
@@ -88,6 +91,7 @@ impl LayerState {
             size,
             align,
             color,
+            fx: Vec::new(),
         })
     }
 }

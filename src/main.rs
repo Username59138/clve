@@ -1,4 +1,5 @@
 mod check;
+mod fx;
 mod new;
 mod probe;
 mod project;
@@ -260,14 +261,22 @@ fn list_effects() -> Result<()> {
         })
         .unwrap_or_default();
     names.sort();
+    let builtin = |n: &str| {
+        script::BUILTIN_EFFECTS.iter().any(|(b, _)| *b == n) || fx::spec(n).is_some()
+    };
     for n in &names {
-        let overrides = script::BUILTIN_EFFECTS.iter().any(|(b, _)| b == n);
-        let note = if overrides { "  (overrides built-in)" } else { "" };
+        let note = if builtin(n) { "  (overrides built-in)" } else { "" };
         println!("{n:<12} effects/{n}.lua{note}");
     }
     for (n, _) in script::BUILTIN_EFFECTS {
         if !names.iter().any(|m| m == n) {
-            println!("{n:<12} built-in");
+            println!("{n:<12} built-in, motion");
+        }
+    }
+    for spec in fx::SPECS {
+        if !names.iter().any(|m| m == spec.name) {
+            let params: Vec<&str> = spec.params.iter().map(|(k, _)| *k).collect();
+            println!("{:<12} built-in, pixels ({})", spec.name, params.join(", "));
         }
     }
     Ok(())
