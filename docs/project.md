@@ -92,4 +92,9 @@ clve render -o final.mp4
 clve render --from 10s --to 30s                only a part
 clve render --preview                          480p, fast
 clve render --frame 3.5 -o frame.png           one frame as PNG
+clve render -o clip.webm                       VP9 + Opus
+clve render -o clip.gif --width 640            animated GIF (no sound)
 ```
+
+The format follows the extension of `-o`: `.mp4`, `.mov`, `.mkv`, `.webm` or `.gif`.
+`--width` scales the output, keeping the project's aspect ratio.

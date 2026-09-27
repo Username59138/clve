@@ -12,7 +12,7 @@ use crate::script::{Env, Script};
 use crate::time;
 use anyhow::{bail, Context, Result};
 use decode::VideoDecoder;
-use encode::{EncodeSettings, Encoder};
+use encode::{EncodeSettings, Encoder, Format};
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -28,6 +28,8 @@ pub struct Options {
     pub preview: bool,
     /// Render a single frame at this time into a PNG.
     pub frame: Option<f64>,
+    /// Output width in pixels; height follows the project's aspect ratio.
+    pub width: Option<u32>,
 }
 
 const PREVIEW_HEIGHT: u32 = 480;
@@ -69,14 +71,23 @@ pub fn run(project: &Project, opts: Options) -> Result<()> {
     };
 
     // output size: preview renders small, everything else at full resolution
-    let k = if opts.preview && ph > PREVIEW_HEIGHT {
-        PREVIEW_HEIGHT as f64 / ph as f64
-    } else {
-        1.0
+    let k = match opts.width {
+        Some(w) if w < 2 => bail!("--width must be at least 2"),
+        Some(w) => w as f64 / pw as f64,
+        None if opts.preview && ph > PREVIEW_HEIGHT => PREVIEW_HEIGHT as f64 / ph as f64,
+        None => 1.0,
     };
     let (ow, oh) = (even(pw as f64 * k), even(ph as f64 * k));
 
     let out = output_path(project, &opts)?;
+    if opts.frame.is_some() {
+        let png = out.extension().is_some_and(|e| e.eq_ignore_ascii_case("png"));
+        if !png {
+            bail!("--frame writes a PNG image, so -o must end with .png");
+        }
+    } else {
+        Format::from_path(&out)?;
+    }
     if let Some(dir) = out.parent() {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("can't create {}", dir.display()))?;
@@ -121,7 +132,8 @@ pub fn run(project: &Project, opts: Options) -> Result<()> {
         );
         let wav = std::env::temp_dir().join(format!("clve-{}.wav", std::process::id()));
         let tmp = audio::TempFile(wav.clone());
-        let has_audio = audio::mix(&report.layers, &env, from, to, frames, &wav)?;
+        let has_audio = Format::from_path(&out)?.has_audio()
+            && audio::mix(&report.layers, &env, from, to, frames, &wav)?;
         let audio_path = has_audio.then_some(wav.as_path());
         let set = EncodeSettings {
             width: ow,

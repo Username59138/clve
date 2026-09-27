@@ -4,7 +4,7 @@ Command Line Video Editor. Edit video as a project: a folder of layers, TOML for
 
 ![title card rendered by clve](docs/demo.gif)
 
-<sub>Rendered from [`examples/title-card`](examples/title-card).</sub>
+<sub>Rendered from [`examples/title-card`](examples/title-card) with `clve render -o demo.gif --width 640`.</sub>
 
 ## Install
 
@@ -33,7 +33,7 @@ function frame(t, layer)
 end
 ```
 
-`clve render --frame 2s -o frame.png` shows a single frame, `clve render --preview` makes a quick 480p draft.
+`clve render --frame 2s -o frame.png` shows a single frame, `clve render --preview` makes a quick 480p draft, `-o clip.webm` or `-o clip.gif` picks another format.
 
 ## Docs
 

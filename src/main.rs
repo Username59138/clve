@@ -61,6 +61,9 @@ enum Cmd {
         /// Render only the frame at this time into a PNG
         #[arg(long, value_parser = parse_time, conflicts_with_all = ["from", "to"])]
         frame: Option<f64>,
+        /// Output width in pixels, e.g. --width 640 for a small GIF
+        #[arg(long)]
+        width: Option<u32>,
     },
     /// Draw the timeline in the terminal
     Timeline {
@@ -145,6 +148,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             to,
             preview,
             frame,
+            width,
         } => render::run(
             &Project::discover()?,
             render::Options {
@@ -153,6 +157,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 to,
                 preview,
                 frame,
+                width,
             },
         )?,
         Cmd::Timeline { width, json } => {
