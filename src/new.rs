@@ -21,6 +21,7 @@ pub fn video(name: &str) -> Result<()> {
             codec: "h264".into(),
             quality: "high".into(),
             output: "out/".into(),
+            crf: None,
         },
     };
     std::fs::write(root.join(PROJECT_FILE), toml::to_string(&project)?)?;
@@ -44,15 +45,10 @@ pub fn layer(kind: LayerType, name: &str, value: &str, copy: bool) -> Result<()>
 
     let mut cfg = LayerConfig {
         kind,
-        source: None,
-        content: None,
-        color: None,
-        font: None,
-        size: None,
         start: "0s".into(),
         duration: "5s".into(),
-        trim_in: None,
         z: next_free_z(&project, kind)?,
+        ..Default::default()
     };
 
     match kind {

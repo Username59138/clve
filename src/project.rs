@@ -33,6 +33,9 @@ pub struct RenderConfig {
     pub quality: String,
     #[serde(default = "default_output")]
     pub output: String,
+    /// Overrides `quality` for those who know x264.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crf: Option<u32>,
 }
 
 fn default_codec() -> String {
@@ -47,9 +50,10 @@ fn default_output() -> String {
 
 // ---------- layer.toml ----------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum LayerType {
+    #[default]
     Video,
     Image,
     Text,
@@ -90,7 +94,21 @@ pub struct LayerFile {
     pub layer: LayerConfig,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+/// How a video or image is sized to the canvas before `scale` is applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Fit {
+    /// Whole picture visible, letterboxed if needed.
+    Contain,
+    /// Fills the canvas, cropping what does not fit.
+    Cover,
+    /// Fills the canvas, ignoring aspect ratio.
+    Stretch,
+    /// Original pixel size.
+    None,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct LayerConfig {
     #[serde(rename = "type")]
     pub kind: LayerType,
@@ -118,6 +136,33 @@ pub struct LayerConfig {
     /// Height: higher value is drawn on top.
     #[serde(default)]
     pub z: i32,
+
+    // ----- transform: defaults put the layer in the middle of the frame -----
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub y: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f64>,
+    /// Degrees, clockwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opacity: Option<f64>,
+    /// "center", "top-left", "bottom-right", ...
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<String>,
+    /// video/image: contain (video default), cover, stretch, none (image default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fit: Option<Fit>,
+
+    // ----- type-specific -----
+    /// video/audio: 1.0 = original loudness.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volume: Option<f64>,
+    /// text: "left", "center", "right".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub align: Option<String>,
 }
 
 fn zero_time() -> String {

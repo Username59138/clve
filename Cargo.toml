@@ -6,6 +6,9 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
+cosmic-text = "0.19.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+tiny-skia = "0.12.0"
 toml = "1.1.6"

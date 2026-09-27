@@ -1,9 +1,12 @@
 //! Resolving layers into time spans and validating the project.
+//! The render uses the same resolved spans, so check and render never disagree.
 
-use crate::probe;
+use crate::probe::{self, MediaInfo};
 use crate::project::{Layer, LayerType, Project};
+use crate::scene::LayerState;
 use crate::time;
 use serde::Serialize;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Span {
@@ -13,6 +16,20 @@ pub struct Span {
     pub z: i32,
     pub start: f64,
     pub end: f64,
+    /// Offset into the source file, seconds.
+    #[serde(rename = "in")]
+    pub trim_in: f64,
+    #[serde(skip)]
+    pub dir: PathBuf,
+    #[serde(skip)]
+    pub source: Option<PathBuf>,
+    #[serde(skip)]
+    pub media: Option<MediaInfo>,
+    /// Image size in pixels.
+    #[serde(skip)]
+    pub image_size: Option<(u32, u32)>,
+    #[serde(skip)]
+    pub state: Option<LayerState>,
 }
 
 #[derive(Debug, Serialize)]
@@ -47,15 +64,30 @@ impl Report {
 pub fn analyze(project: &Project) -> Report {
     let mut r = Report::default();
 
-    let [w, h] = project.file.render.resolution;
+    let render = &project.file.render;
+    let [w, h] = render.resolution;
     if w == 0 || h == 0 {
         r.err(None, "project.toml: resolution must not be zero");
     }
     if w % 2 == 1 || h % 2 == 1 {
         r.warn(None, "project.toml: odd resolution, h264 does not like that");
     }
-    if !(project.file.render.fps > 0.0) {
+    if !(render.fps > 0.0) {
         r.err(None, "project.toml: fps must be greater than zero");
+    }
+    if !matches!(render.codec.as_str(), "h264" | "h265") {
+        r.err(None, format!("project.toml: codec = \"{}\": expected h264 or h265", render.codec));
+    }
+    if !matches!(render.quality.as_str(), "low" | "medium" | "high" | "lossless") {
+        r.err(
+            None,
+            format!("project.toml: quality = \"{}\": expected low, medium, high or lossless", render.quality),
+        );
+    }
+    if let Some(crf) = render.crf {
+        if crf > 51 {
+            r.err(None, format!("project.toml: crf = {crf}: expected 0..51"));
+        }
     }
 
     let layers = match project.layers() {
@@ -85,40 +117,55 @@ pub fn analyze(project: &Project) -> Report {
 fn resolve(project: &Project, layer: &Layer, r: &mut Report) -> Option<Span> {
     let c = &layer.config;
     let name = layer.name.as_str();
+    let canvas = (project.file.render.resolution[0], project.file.render.resolution[1]);
+
+    let state = match LayerState::from_config(c, canvas) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            r.err(Some(name), format!("{e:#}"));
+            None
+        }
+    };
 
     // content, by layer type
-    let mut source_len = None;
+    let mut source = None;
+    let mut media = None;
+    let mut image_size = None;
     if c.kind.has_source() {
         match &c.source {
-            None => {
-                r.err(Some(name), format!("layer of type {} needs a source", c.kind));
-            }
+            None => r.err(Some(name), format!("layer of type {} needs a source", c.kind)),
             Some(src) => {
                 let path = project.root.join(src);
                 if !path.is_file() {
                     r.err(Some(name), format!("file not found: {src}"));
-                    } else if c.kind.has_natural_duration() {
-                    match probe::duration(&path) {
-                        Ok(d) => source_len = Some(d),
-                        Err(e) => {
-                            r.err(Some(name), format!("{e:#}"));
-                                    }
+                } else if c.kind == LayerType::Image {
+                    match image::image_dimensions(&path) {
+                        Ok(size) => image_size = Some(size),
+                        Err(e) => r.err(Some(name), format!("can't read image {src}: {e}")),
+                    }
+                } else {
+                    match probe::info(&path) {
+                        Ok(info) => {
+                            if c.kind == LayerType::Video && info.video.is_none() {
+                                r.err(Some(name), format!("{src} has no video stream"));
+                            }
+                            if c.kind == LayerType::Audio && !info.has_audio {
+                                r.err(Some(name), format!("{src} has no audio stream"));
+                            }
+                            media = Some(info);
+                        }
+                        Err(e) => r.err(Some(name), format!("{e:#}")),
                     }
                 }
+                source = Some(path);
             }
         }
     }
     if c.kind == LayerType::Text && c.content.as_deref().unwrap_or("").is_empty() {
         r.err(Some(name), "text layer has empty content");
     }
-    if matches!(c.kind, LayerType::Color | LayerType::Text) {
-        if let Some(col) = &c.color {
-            if !valid_color(col) {
-                r.err(Some(name), format!("color \"{col}\" is not #rrggbb"));
-            }
-        } else if c.kind == LayerType::Color {
-            r.err(Some(name), "color layer needs color = \"#rrggbb\"");
-        }
+    if c.kind == LayerType::Color && c.color.is_none() {
+        r.err(Some(name), "color layer needs color = \"#rrggbb\"");
     }
     if !layer.dir.join("layer.lua").is_file() {
         r.warn(Some(name), "no layer.lua — the layer will be static");
@@ -141,6 +188,7 @@ fn resolve(project: &Project, layer: &Layer, r: &mut Report) -> Option<Span> {
     if trim_in > 0.0 && !c.kind.has_natural_duration() {
         r.warn(Some(name), format!("in has no effect on a layer of type {}", c.kind));
     }
+    let source_len = media.as_ref().map(|m| m.duration);
 
     let duration = if c.duration.trim() == "full" {
         if !c.kind.has_natural_duration() {
@@ -174,7 +222,7 @@ fn resolve(project: &Project, layer: &Layer, r: &mut Report) -> Option<Span> {
                         r.warn(
                             Some(name),
                             format!(
-                                "source is too short: needs {} from {}, file has {}",
+                                "source is too short: needs {} from {}, file has {} (last frame will be held)",
                                 time::format(d),
                                 time::format(trim_in),
                                 time::format(len)
@@ -201,6 +249,12 @@ fn resolve(project: &Project, layer: &Layer, r: &mut Report) -> Option<Span> {
         z: c.z,
         start,
         end: start + duration,
+        trim_in,
+        dir: layer.dir.clone(),
+        source,
+        media,
+        image_size,
+        state,
     })
 }
 
@@ -243,9 +297,4 @@ fn find_overlaps(r: &mut Report) {
     for m in found {
         r.err(None, m);
     }
-}
-
-fn valid_color(s: &str) -> bool {
-    let hex = s.strip_prefix('#').unwrap_or("");
-    matches!(hex.len(), 6 | 8) && hex.chars().all(|c| c.is_ascii_hexdigit())
 }

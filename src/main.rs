@@ -2,6 +2,8 @@ mod check;
 mod new;
 mod probe;
 mod project;
+mod render;
+mod scene;
 mod time;
 mod timeline;
 
@@ -40,6 +42,24 @@ enum Cmd {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Render the project to a video file (or a single frame to PNG)
+    Render {
+        /// Output file (default: <render.output>/<name>.mp4)
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+        /// Start of the range to render, e.g. 10s or 01:30
+        #[arg(long, value_parser = parse_time)]
+        from: Option<f64>,
+        /// End of the range to render
+        #[arg(long, value_parser = parse_time)]
+        to: Option<f64>,
+        /// Fast low-quality render (480p, ultrafast preset)
+        #[arg(long)]
+        preview: bool,
+        /// Render only the frame at this time into a PNG
+        #[arg(long, value_parser = parse_time, conflicts_with_all = ["from", "to"])]
+        frame: Option<f64>,
     },
     /// Draw the timeline in the terminal
     Timeline {
@@ -118,6 +138,22 @@ fn run(cli: Cli) -> Result<ExitCode> {
         },
         Cmd::Rm { what } => rm(what)?,
         Cmd::Check { json } => return check(json),
+        Cmd::Render {
+            output,
+            from,
+            to,
+            preview,
+            frame,
+        } => render::run(
+            &Project::discover()?,
+            render::Options {
+                output,
+                from,
+                to,
+                preview,
+                frame,
+            },
+        )?,
         Cmd::Timeline { width, json } => {
             let report = check::analyze(&Project::discover()?);
             if json {
@@ -131,6 +167,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn parse_time(s: &str) -> Result<f64, String> {
+    time::parse(s).map_err(|e| e.to_string())
 }
 
 fn check(json: bool) -> Result<ExitCode> {
