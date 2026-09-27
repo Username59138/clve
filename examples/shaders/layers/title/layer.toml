@@ -1,0 +1,10 @@
+[layer]
+type = "text"
+content = "clve"
+font = "monospace"
+size = 240.0
+color = "#ffffff"
+start = "0s"
+duration = "5s"
+z = 1
+y = 480

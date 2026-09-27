@@ -135,6 +135,11 @@ it makes encoding slower and files bigger, in clve as in any editor. Use
 
 `clve list effects` shows every effect with its parameters.
 
+### Shaders
+
+An effect file can also carry a WGSL shader that runs on the GPU — see
+[shaders.md](shaders.md).
+
 ### Writing an effect
 
 `clve new effect glitch` creates `effects/glitch.lua`:
