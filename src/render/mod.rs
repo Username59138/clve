@@ -1,5 +1,6 @@
 //! clve render: composite every frame in Rust, encode with ffmpeg.
 
+mod audio;
 mod decode;
 mod encode;
 mod text;
@@ -7,6 +8,7 @@ mod text;
 use crate::check::{self, Span};
 use crate::project::{Fit, LayerType, Project};
 use crate::scene::LayerState;
+use crate::script::{Env, Script};
 use crate::time;
 use anyhow::{bail, Context, Result};
 use decode::VideoDecoder;
@@ -80,14 +82,20 @@ pub fn run(project: &Project, opts: Options) -> Result<()> {
             .with_context(|| format!("can't create {}", dir.display()))?;
     }
 
+    let env = Env {
+        root: project.root.clone(),
+        width: pw,
+        height: ph,
+        fps,
+        duration: total,
+    };
     let mut text = TextRenderer::new();
     // visual layers, bottom to top
-    let mut visuals: Vec<Runtime> = report
-        .layers
-        .iter()
-        .filter(|s| !s.kind.is_audio_only())
-        .map(|s| Runtime::new(s.clone()))
-        .collect();
+    let mut visuals = Vec::new();
+    for s in report.layers.iter().filter(|s| !s.kind.is_audio_only()) {
+        let script = Script::load(s, &env).with_context(|| format!("layer \"{}\"", s.name))?;
+        visuals.push(Runtime::new(s.clone(), script));
+    }
     visuals.sort_by_key(|r| r.span.z);
     for r in &visuals {
         if r.span.kind == LayerType::Text && !text.has_family(&r.base.font) {
@@ -101,6 +109,8 @@ pub fn run(project: &Project, opts: Options) -> Result<()> {
     let ctx = Ctx { fps, k, canvas: (pw as f64, ph as f64) };
     let mut canvas = Pixmap::new(ow, oh).context("invalid output size")?;
 
+    // audio first: it is quick, and the encoder needs the whole mix as an input
+    let mut _audio_file = None;
     let mut encoder = if opts.frame.is_none() {
         eprintln!(
             "rendering {} → {} ({ow}x{oh}, {} fps, {})",
@@ -109,8 +119,20 @@ pub fn run(project: &Project, opts: Options) -> Result<()> {
             fps,
             time::format(to - from)
         );
-        let set = EncodeSettings { width: ow, height: oh, fps, from, to, preview: opts.preview };
-        Some(Encoder::start(&out, cfg, &set, &report.layers)?)
+        let wav = std::env::temp_dir().join(format!("clve-{}.wav", std::process::id()));
+        let tmp = audio::TempFile(wav.clone());
+        let has_audio = audio::mix(&report.layers, &env, from, to, frames, &wav)?;
+        let audio_path = has_audio.then_some(wav.as_path());
+        let set = EncodeSettings {
+            width: ow,
+            height: oh,
+            fps,
+            duration: to - from,
+            preview: opts.preview,
+        };
+        let enc = Encoder::start(&out, cfg, &set, audio_path)?;
+        _audio_file = Some(tmp);
+        Some(enc)
     } else {
         None
     };
@@ -156,15 +178,16 @@ struct Ctx {
 struct Runtime {
     span: Span,
     base: LayerState,
+    script: Option<Script>,
     video: Option<VideoDecoder>,
     image: Option<Pixmap>,
     text: Option<(TextKey, Option<Pixmap>, f64)>,
 }
 
 impl Runtime {
-    fn new(span: Span) -> Runtime {
+    fn new(span: Span, script: Option<Script>) -> Runtime {
         let base = span.state.clone().expect("check guarantees a valid state");
-        Runtime { span, base, video: None, image: None, text: None }
+        Runtime { span, base, script, video: None, image: None, text: None }
     }
 
     fn draw(&mut self, canvas: &mut Pixmap, t: f64, ctx: &Ctx, text: &mut TextRenderer) -> Result<()> {
@@ -179,8 +202,13 @@ impl Runtime {
             return Ok(());
         }
 
-        // Per-frame state. This is where Lua will change things.
-        let st = self.base.clone();
+        // fresh properties from layer.toml every frame, then the script changes them
+        let mut st = self.base.clone();
+        if let Some(script) = &self.script {
+            script
+                .apply(t - self.span.start, t, &mut st)
+                .with_context(|| format!("at {}", time::format(t)))?;
+        }
         if !st.visible || st.opacity <= 0.0 {
             // still advance the video so it stays in sync
             if self.span.kind == LayerType::Video {

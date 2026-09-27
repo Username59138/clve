@@ -1,0 +1,6 @@
+[layer]
+type = "color"
+color = "#0f1226"
+start = "0s"
+duration = "6s"
+z = 0

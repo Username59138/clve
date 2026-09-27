@@ -1,0 +1,10 @@
+[layer]
+type = "text"
+content = "video editing as a project"
+font = "sans-serif"
+size = 64.0
+color = "#c8c8ff"
+start = "1s"
+duration = "5s"
+z = 2
+y = 640

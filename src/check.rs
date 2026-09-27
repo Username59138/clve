@@ -4,6 +4,7 @@
 use crate::probe::{self, MediaInfo};
 use crate::project::{Layer, LayerType, Project};
 use crate::scene::LayerState;
+use crate::script::{Env, Script};
 use crate::time;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -109,7 +110,47 @@ pub fn analyze(project: &Project) -> Report {
 
     find_overlaps(&mut r);
     r.duration = r.layers.iter().map(|s| s.end).fold(0.0, f64::max);
+    if render.fps > 0.0 {
+        try_scripts(project, &mut r);
+    }
     r
+}
+
+/// Loads every layer.lua and runs frame() at a few points of the layer,
+/// so script errors show up now and not halfway through a long render.
+fn try_scripts(project: &Project, r: &mut Report) {
+    let render = &project.file.render;
+    let env = Env {
+        root: project.root.clone(),
+        width: render.resolution[0],
+        height: render.resolution[1],
+        fps: render.fps,
+        duration: r.duration,
+    };
+    let mut problems = Vec::new();
+    for span in &r.layers {
+        let Some(base) = &span.state else { continue };
+        let script = match Script::load(span, &env) {
+            Ok(Some(s)) => s,
+            Ok(None) => continue,
+            Err(e) => {
+                problems.push((span.name.clone(), format!("{e:#}")));
+                continue;
+            }
+        };
+        let len = span.end - span.start;
+        let last = (len - 1.0 / render.fps).max(0.0);
+        for t in [0.0, len * 0.25, len * 0.5, len * 0.75, last] {
+            let mut st = base.clone();
+            if let Err(e) = script.apply(t, span.start + t, &mut st) {
+                problems.push((span.name.clone(), format!("{e:#} (at t = {})", time::format(t))));
+                break;
+            }
+        }
+    }
+    for (layer, msg) in problems {
+        r.err(Some(&layer), msg);
+    }
 }
 
 /// Works out where a layer sits on the timeline. Returns None if the layer is

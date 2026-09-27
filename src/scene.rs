@@ -25,6 +25,8 @@ pub struct LayerState {
     pub visible: bool,
     pub fit: Fit,
     pub volume: f64,
+    /// -1 left .. 1 right
+    pub pan: f64,
     // text
     pub text: String,
     pub font: String,
@@ -80,6 +82,7 @@ impl LayerState {
             visible: true,
             fit,
             volume,
+            pan: c.pan.unwrap_or(0.0).clamp(-1.0, 1.0),
             text: c.content.clone().unwrap_or_default(),
             font: c.font.clone().unwrap_or_else(|| "sans-serif".into()),
             size,

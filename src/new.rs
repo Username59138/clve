@@ -94,9 +94,11 @@ pub fn effect(name: &str) -> Result<()> {
         &path,
         format!(
             "-- effect {name}\n\
-             -- usage in layer.lua: layer:effect(\"{name}\", {{ power = 1 }})\n\n\
+             -- usage in layer.lua: layer:effect(\"{name}\", {{ power = 0.5 }})\n\n\
+             -- defaults; passing a parameter that is not listed here is an error\n\
              params = {{\n  power = 1.0,\n}}\n\n\
-             function apply(t, layer, p)\n  -- layer.opacity = layer.opacity * p.power\nend\n"
+             -- t: seconds since the layer started, p: params merged with the defaults\n\
+             function apply(t, layer, p)\n  layer.opacity = layer.opacity * p.power\nend\n"
         ),
     )?;
     println!("created effect {name} → effects/{name}.lua");
@@ -153,19 +155,23 @@ fn next_free_z(project: &Project, kind: LayerType) -> Result<i32> {
 
 fn lua_template(kind: LayerType) -> String {
     let specific = match kind {
-        LayerType::Video => "  -- layer.volume = 1.0\n",
-        LayerType::Audio => "  -- layer.volume = fade_in(t, 0, 1.0)\n",
+        LayerType::Video => "  -- layer:effect(\"fade\", { enter = 0.5, exit = 0.5 })\n",
+        LayerType::Audio => "  -- layer.volume = fade_in(t, 0, 2) * fade_out(t, clip.duration - 2, 2)\n",
         LayerType::Text => "  -- layer.text = typewriter(layer.content, t, 0.05)\n",
-        LayerType::Color => "  -- layer.color = \"#101010\"\n",
-        LayerType::Image => "",
+        LayerType::Color => "  -- layer.color = mix_color(\"#101010\", \"#303060\", progress(t, 0, clip.duration))\n",
+        LayerType::Image => "  -- layer:effect(\"pop\")\n",
+    };
+    let common = if kind == LayerType::Audio {
+        ""
+    } else {
+        "  -- layer.x = project.width / 2 + math.sin(t) * 100\n  -- layer.opacity = fade_in(t, 0, 0.5)\n"
     };
     format!(
-        "-- called on every frame\n\
-         -- t: time since the layer started (seconds)\n\
+        "-- Called on every frame. `layer` starts with the values from layer.toml;\n\
+         -- whatever you change here applies to this frame only.\n\
+         -- t: seconds since the layer started\n\
          function frame(t, layer)\n\
-         \x20 -- layer.x, layer.y = project.width / 2, project.height / 2\n\
-         \x20 -- layer.scale = 1.0\n\
-         \x20 -- layer.opacity = ease_out(t, 0, 0.5)\n\
+         {common}\
          {specific}\
          end\n"
     )

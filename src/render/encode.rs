@@ -1,11 +1,9 @@
-//! Encoding: raw frames go into ffmpeg's stdin; audio from every layer is
-//! trimmed, delayed and mixed by ffmpeg in the same process.
+//! Encoding: raw frames go into ffmpeg's stdin, the pre-mixed audio comes from a WAV file.
 
-use crate::check::Span;
-use crate::project::{LayerType, RenderConfig};
+use crate::project::RenderConfig;
 use anyhow::{bail, Context, Result};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::thread::JoinHandle;
 
@@ -19,49 +17,13 @@ pub struct EncodeSettings {
     pub width: u32,
     pub height: u32,
     pub fps: f64,
-    pub from: f64,
-    pub to: f64,
+    pub duration: f64,
     pub preview: bool,
 }
 
-/// An audio source cut to the render range.
-struct AudioClip {
-    path: PathBuf,
-    seek: f64,
-    duration: f64,
-    delay: f64,
-    volume: f64,
-}
-
-fn audio_clips(spans: &[Span], from: f64, to: f64) -> Vec<AudioClip> {
-    let mut clips = Vec::new();
-    for s in spans {
-        let has_audio = match s.kind {
-            LayerType::Audio => true,
-            LayerType::Video => s.media.as_ref().is_some_and(|m| m.has_audio),
-            _ => false,
-        };
-        let volume = s.state.as_ref().map_or(1.0, |st| st.volume);
-        let (Some(path), true) = (&s.source, has_audio) else { continue };
-        let begin = s.start.max(from);
-        let end = s.end.min(to);
-        if end <= begin || volume <= 0.0 {
-            continue;
-        }
-        clips.push(AudioClip {
-            path: path.clone(),
-            seek: s.trim_in + (begin - s.start),
-            duration: end - begin,
-            delay: begin - from,
-            volume,
-        });
-    }
-    clips
-}
-
 impl Encoder {
-    pub fn start(out: &Path, cfg: &RenderConfig, set: &EncodeSettings, spans: &[Span]) -> Result<Encoder> {
-        let duration = set.to - set.from;
+    pub fn start(out: &Path, cfg: &RenderConfig, set: &EncodeSettings, audio: Option<&Path>) -> Result<Encoder> {
+        let duration = set.duration;
         let mut cmd = Command::new("ffmpeg");
         cmd.args(["-nostdin", "-y", "-v", "error"]);
         cmd.args(["-f", "rawvideo", "-pix_fmt", "rgba"])
@@ -69,33 +31,12 @@ impl Encoder {
             .args(["-framerate", &fps_arg(set.fps)])
             .args(["-i", "pipe:0"]);
 
-        let clips = audio_clips(spans, set.from, set.to);
-        for c in &clips {
-            cmd.args(["-ss", &format!("{:.6}", c.seek)])
-                .args(["-t", &format!("{:.6}", c.duration)])
-                .arg("-i")
-                .arg(&c.path);
+        if let Some(wav) = audio {
+            cmd.arg("-i").arg(wav);
         }
         cmd.args(["-map", "0:v"]);
-        if !clips.is_empty() {
-            let mut graph = String::new();
-            for (i, c) in clips.iter().enumerate() {
-                let ms = (c.delay * 1000.0).round() as u64;
-                graph += &format!(
-                    "[{}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume={:.4},adelay={ms}:all=1[a{i}];",
-                    i + 1,
-                    c.volume
-                );
-            }
-            for i in 0..clips.len() {
-                graph += &format!("[a{i}]");
-            }
-            graph += &format!(
-                "amix=inputs={}:normalize=0:dropout_transition=0[aout]",
-                clips.len()
-            );
-            cmd.args(["-filter_complex", &graph, "-map", "[aout]"]);
-            cmd.args(["-c:a", "aac", "-b:a", "192k"]);
+        if audio.is_some() {
+            cmd.args(["-map", "1:a", "-c:a", "aac", "-b:a", "192k"]);
         }
 
         let (crf, preset) = if set.preview {

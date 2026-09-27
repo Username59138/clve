@@ -160,6 +160,9 @@ pub struct LayerConfig {
     /// video/audio: 1.0 = original loudness.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volume: Option<f64>,
+    /// video/audio: -1 left .. 1 right.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pan: Option<f64>,
     /// text: "left", "center", "right".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub align: Option<String>,

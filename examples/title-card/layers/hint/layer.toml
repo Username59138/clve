@@ -1,0 +1,10 @@
+[layer]
+type = "text"
+content = "layers/ + TOML + Lua"
+font = "monospace"
+size = 40.0
+color = "#8a8fb8"
+start = "2s"
+duration = "4s"
+z = 3
+y = 780

@@ -4,6 +4,7 @@ mod probe;
 mod project;
 mod render;
 mod scene;
+mod script;
 mod time;
 mod timeline;
 
@@ -254,11 +255,15 @@ fn list_effects() -> Result<()> {
         })
         .unwrap_or_default();
     names.sort();
-    if names.is_empty() {
-        println!("no effects — create one: clve new effect <name>");
+    for n in &names {
+        let overrides = script::BUILTIN_EFFECTS.iter().any(|(b, _)| b == n);
+        let note = if overrides { "  (overrides built-in)" } else { "" };
+        println!("{n:<12} effects/{n}.lua{note}");
     }
-    for n in names {
-        println!("{n}");
+    for (n, _) in script::BUILTIN_EFFECTS {
+        if !names.iter().any(|m| m == n) {
+            println!("{n:<12} built-in");
+        }
     }
     Ok(())
 }
