@@ -82,7 +82,10 @@ layer:effect("fade", { enter = 1, exit = 0.5 })
 Effects run immediately, in the order they are called, and change `layer` just
 like the rest of the script.
 
-Built-in:
+### Motion
+
+Written in Lua (the source is in `src/lua/effects/`), they change position,
+size, rotation and opacity.
 
 | name       | params                                             |
 |------------|----------------------------------------------------|
@@ -93,6 +96,44 @@ Built-in:
 | `slide_in` | `from = "left"`, `len = 0.6`, `easing = "ease_out"`, `distance = 0` |
 | `spin`     | `speed = 90`                                       |
 | `zoom`     | `from = 1.0`, `to = 1.1`, `easing = "linear"`      |
+
+### Pixels
+
+Built into clve and run in Rust. They change the layer's image before it is
+placed in the frame, so `blur` on a title blurs only the title. They apply in
+the order you call them, and their parameters can be animated like anything
+else: `layer:effect("blur", { radius = 20 * fade_out(t, 0, 1) })`.
+
+Lengths are in project pixels, so a preview looks the same as the full render,
+just smaller.
+
+| name          | params                                                        | notes |
+|---------------|---------------------------------------------------------------|-------|
+| `brightness`  | `amount = 1.2`                                                | 1 = unchanged |
+| `contrast`    | `amount = 1.2`                                                | 1 = unchanged |
+| `saturation`  | `amount = 1.5`                                                | 0 = gray, 1 = unchanged |
+| `hue`         | `degrees = 30`                                                | rotates colors |
+| `grayscale`   | `amount = 1`                                                  | |
+| `sepia`       | `amount = 1`                                                  | |
+| `invert`      | `amount = 1`                                                  | |
+| `tint`        | `color = "#ff8800"`, `amount = 0.3`                           | |
+| `temperature` | `amount = 0.3`                                                | warmer above 0, cooler below |
+| `blur`        | `radius = 8`                                                  | |
+| `sharpen`     | `amount = 0.6`, `radius = 2`                                  | |
+| `pixelate`    | `size = 16`                                                   | |
+| `vignette`    | `amount = 0.5`, `radius = 0.5`, `softness = 0.5`              | darkens the edges |
+| `grain`       | `amount = 0.06`, `size = 1.5`, `speed = 12`, `seed = 0`       | `speed` = new grain per second, 0 = still |
+| `glow`        | `radius = 20`, `amount = 0.8`, `threshold = 0.6`              | bright parts bleed light |
+| `shadow`      | `x = 8`, `y = 8`, `blur = 12`, `color = "#000000"`, `opacity = 0.6` | |
+| `chroma_key`  | `color = "#00ff00"`, `similarity = 0.25`, `smoothness = 0.08`, `spill = 0.5` | green screen |
+| `rounded`     | `radius = 24`                                                 | rounded corners |
+| `crop`        | `left`, `top`, `right`, `bottom` = 0                          | in pixels, the layer stays in place |
+
+Moving grain is noise that changes every frame, and noise hardly compresses:
+it makes encoding slower and files bigger, in clve as in any editor. Use
+`speed = 0` for still grain, or keep it for the final render.
+
+`clve list effects` shows every effect with its parameters.
 
 ### Writing an effect
 
@@ -114,3 +155,6 @@ end
 `params` holds the defaults; passing a parameter that is not listed there is an
 error, so typos don't go unnoticed. A project effect with the same name as a
 built-in one replaces it.
+
+Your effects can use the built-in ones: `layer:effect("blur", { radius = 4 })`
+inside `apply` works the same as in `layer.lua`.
