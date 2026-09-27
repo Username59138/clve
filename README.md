@@ -8,7 +8,7 @@ Command Line Video Editor. Edit video as a project: a folder of layers, TOML for
 
 ## Install
 
-Requires Rust and ffmpeg.
+Requires Rust and ffmpeg. Shader effects also need a GPU driver (Vulkan, Metal, DX12 or OpenGL).
 
 ```
 cargo install --path .
@@ -39,3 +39,4 @@ end
 
 - [Project format and commands](docs/project.md)
 - [Lua API](docs/lua.md)
+- [Shader effects](docs/shaders.md)

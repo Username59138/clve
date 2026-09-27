@@ -6,6 +6,7 @@ mod project;
 mod render;
 mod scene;
 mod script;
+mod shader;
 mod time;
 mod timeline;
 
@@ -92,8 +93,13 @@ enum NewCmd {
         #[arg(long)]
         link: bool,
     },
-    /// New effect in effects/: clve new effect <name>
-    Effect { name: String },
+    /// New effect in effects/: clve new effect <name> [--shader]
+    Effect {
+        name: String,
+        /// Start from a GPU shader template instead of a Lua one
+        #[arg(long)]
+        shader: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -135,7 +141,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 value,
                 link,
             } => new::layer(kind, &name, &value, !link)?,
-            NewCmd::Effect { name } => new::effect(&name)?,
+            NewCmd::Effect { name, shader } => new::effect(&name, shader)?,
         },
         Cmd::List { what } => match what {
             ListCmd::Layers { json } => list_layers(json)?,
